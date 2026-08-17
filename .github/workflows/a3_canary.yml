@@ -1,0 +1,105 @@
+name: A3 Canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: a3-canary
+  cancel-in-progress: false
+
+jobs:
+  a3-canary:
+    runs-on:
+      - self-hosted
+      - Linux
+      - ARM64
+      - tilelang-a3-canary
+
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout trusted fork code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          submodules: false
+          persist-credentials: false
+
+      - name: Verify runner and container
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "runner=${RUNNER_NAME}"
+          echo "user=$(whoami)"
+          echo "arch=$(uname -m)"
+          echo "workspace=${GITHUB_WORKSPACE}"
+          echo "execution_mode=${CI_EXECUTION_MODE:-unset}"
+          echo "container=${CI_CONTAINER_NAME:-unset}"
+
+          test "${RUNNER_NAME}" = "tilelang-a3-canary-fzh"
+          test "$(whoami)" = "runner-fzh"
+          test "$(uname -m)" = "aarch64"
+          test -f /.dockerenv
+          test "${CI_EXECUTION_MODE:-}" = "direct"
+          test -n "${CI_CONTAINER_NAME:-}"
+          test -n "${ASCEND_RT_VISIBLE_DEVICES:-}"
+
+          case "${GITHUB_WORKSPACE}" in
+            /workspace/fzh/actions-runner-canary/_work/*)
+              echo "Runner workspace path: OK"
+              ;;
+            *)
+              echo "Unexpected workspace: ${GITHUB_WORKSPACE}"
+              exit 1
+              ;;
+          esac
+
+          echo "Fixed device whitelist: configured"
+
+      - name: Verify TileLang and fixed NPU
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
+          source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
+          source /workspace/fzh/tilelang-ascend/set_env.sh
+
+          python - <<'PY'
+          import tilelang
+          import torch
+          import torch_npu
+
+          print("TileLang:", tilelang.__file__)
+          print("torch:", torch.__version__)
+          print("torch_npu:", torch_npu.__version__)
+          print("NPU available:", torch.npu.is_available())
+          print("visible devices:", torch.npu.device_count())
+
+          assert torch.npu.is_available()
+          assert torch.npu.device_count() == 1
+
+          # 这里的 0 是白名单内的逻辑卡 0，不是公开的物理卡号。
+          torch.npu.set_device(0)
+          x = torch.arange(4, dtype=torch.float32).npu()
+          result = (x + 1).cpu()
+          torch.npu.synchronize()
+
+          print("result:", result)
+          PY
+
+      - name: Run GEMM example
+        shell: bash
+        working-directory: examples/gemm
+        run: |
+          set -euo pipefail
+
+          source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
+          source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
+          source /workspace/fzh/tilelang-ascend/set_env.sh
+
+          python example_gemm.py
