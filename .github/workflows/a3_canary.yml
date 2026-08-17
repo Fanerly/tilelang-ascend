@@ -69,21 +69,29 @@ jobs:
           source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
           source /workspace/fzh/tilelang-ascend/set_env.sh
 
+          # 避免导入当前尚未编译的 GitHub checkout。
+          cd /workspace/fzh/tilelang-ascend
+
           python - <<'PY'
           import tilelang
+          import tvm
           import torch
           import torch_npu
 
           print("TileLang:", tilelang.__file__)
+          print("TVM:", tvm.__file__)
           print("torch:", torch.__version__)
           print("torch_npu:", torch_npu.__version__)
           print("NPU available:", torch.npu.is_available())
           print("visible devices:", torch.npu.device_count())
 
+          assert tilelang.__file__.startswith(
+              "/workspace/fzh/tilelang-ascend/"
+          )
           assert torch.npu.is_available()
           assert torch.npu.device_count() == 1
 
-          # 这里的 0 是白名单内的逻辑卡 0，不是公开的物理卡号。
+          # 逻辑设备 0，即白名单内唯一可见设备。
           torch.npu.set_device(0)
           x = torch.arange(4, dtype=torch.float32).npu()
           result = (x + 1).cpu()
@@ -94,7 +102,6 @@ jobs:
 
       - name: Run GEMM example
         shell: bash
-        working-directory: examples/gemm
         run: |
           set -euo pipefail
 
@@ -102,4 +109,5 @@ jobs:
           source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
           source /workspace/fzh/tilelang-ascend/set_env.sh
 
+          cd /workspace/fzh/tilelang-ascend/examples/gemm
           python example_gemm.py
