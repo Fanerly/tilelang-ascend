@@ -1,0 +1,183 @@
+name: A3 Checkout Full Canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: a3-checkout-full-canary
+  cancel-in-progress: false
+
+jobs:
+  checkout-full-build:
+    runs-on:
+      - self-hosted
+      - Linux
+      - ARM64
+      - tilelang-a3-canary
+
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout selected branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          submodules: false
+          persist-credentials: false
+
+      - name: Verify runner configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "runner=${RUNNER_NAME}"
+          echo "arch=$(uname -m)"
+          echo "user=$(whoami)"
+          echo "workspace=${GITHUB_WORKSPACE}"
+          echo "commit=${GITHUB_SHA}"
+          echo "branch=${GITHUB_REF_NAME}"
+          echo "mode=${CI_EXECUTION_MODE:-unset}"
+          echo "container=${CI_CONTAINER_NAME:-unset}"
+
+          test "$(whoami)" = "runner-fzh"
+          test "$(uname -m)" = "aarch64"
+          test "${CI_EXECUTION_MODE:-}" = "direct"
+          test -n "${CI_CONTAINER_NAME:-}"
+          test -n "${CI_CPUSET:-}"
+          test -n "${ASCEND_RT_VISIBLE_DEVICES:-}"
+          test -n "${PIP_CONSTRAINT:-}"
+          test -f "${PIP_CONSTRAINT}"
+
+          echo "Fixed device whitelist: configured"
+          echo "CPU limit: configured"
+
+      - name: Initialize recursive submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "${GITHUB_WORKSPACE}"
+
+          git config --local http.version HTTP/1.1
+          git config --local http.lowSpeedLimit 1
+          git config --local http.lowSpeedTime 600
+
+          git submodule sync --recursive
+
+          git \
+            -c http.version=HTTP/1.1 \
+            -c http.lowSpeedLimit=1 \
+            -c http.lowSpeedTime=600 \
+            submodule update \
+            --init \
+            --recursive \
+            --jobs 2 \
+            --depth 1
+
+          git submodule status --recursive \
+            | tee a3_submodules.log
+
+          if git submodule status --recursive | grep -Eq '^[-+]'; then
+            echo "Submodule state is incomplete or mismatched"
+            exit 1
+          fi
+
+      - name: Full build current checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "${GITHUB_WORKSPACE}"
+
+          source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
+          source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
+
+          echo "python=$(which python)"
+          echo "CANN=${ASCEND_HOME_PATH}"
+          echo "Full build with runner CPU limit"
+
+          set +e
+          taskset -c "${CI_CPUSET}" \
+            bash install_ascend.sh \
+            2>&1 | tee a3_full_build.log
+
+          BUILD_RC=${PIPESTATUS[0]}
+          set -e
+
+          echo "BUILD_RC=${BUILD_RC}"
+          test "${BUILD_RC}" -eq 0
+
+      - name: Verify current checkout installation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "${GITHUB_WORKSPACE}"
+
+          source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
+          source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
+          source "${GITHUB_WORKSPACE}/set_env.sh"
+
+          python - <<'PY'
+          import os
+          import tilelang
+          import tvm
+          import torch
+          import torch_npu
+
+          workspace = os.path.realpath(os.environ["GITHUB_WORKSPACE"])
+          tilelang_path = os.path.realpath(tilelang.__file__)
+          tvm_path = os.path.realpath(tvm.__file__)
+
+          print("workspace:", workspace)
+          print("TileLang:", tilelang_path)
+          print("TVM:", tvm_path)
+          print("torch:", torch.__version__)
+          print("torch_npu:", torch_npu.__version__)
+          print("NPU available:", torch.npu.is_available())
+          print("visible devices:", torch.npu.device_count())
+
+          assert tilelang_path.startswith(workspace + os.sep)
+          assert tvm_path.startswith(workspace + os.sep)
+          assert torch.npu.is_available()
+          assert torch.npu.device_count() == 1
+
+          torch.npu.set_device(0)
+          x = torch.arange(4, dtype=torch.float32).npu()
+          result = (x + 1).cpu()
+          torch.npu.synchronize()
+
+          print("result:", result)
+          PY
+
+      - name: Run GEMM benchmark group
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "${GITHUB_WORKSPACE}"
+
+          source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
+          source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
+          source "${GITHUB_WORKSPACE}/set_env.sh"
+
+          cd examples
+
+          set +e
+          bash bench_test.sh \
+            --skip-pytest \
+            --dirs gemm \
+            2>&1 | tee a3_bench_gemm.log
+
+          BENCH_RC=${PIPESTATUS[0]}
+          set -e
+
+          echo "BENCH_RC=${BENCH_RC}"
+          test "${BENCH_RC}" -eq 0
+
+          grep -E \
+            'Total:|Passed:|Failed:|Pass rate:' \
+            a3_bench_gemm.log
