@@ -205,6 +205,12 @@ jobs:
           source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
           source "${GITHUB_WORKSPACE}/set_env.sh"
 
+          export USER="$(id -un)"
+          export LOGNAME="${USER}"
+          export TMPDIR="${RUNNER_TEMP}/tilelang-pytest-main"
+          mkdir -p "${TMPDIR}"
+          chmod 700 "${TMPDIR}"
+
           TAIL_FILE="testing/python/language/test_tilelang_ascend_language_tail_block.py"
 
           set +e
@@ -231,6 +237,12 @@ jobs:
           source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
           source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
           source "${GITHUB_WORKSPACE}/set_env.sh"
+
+          export USER="$(id -un)"
+          export LOGNAME="${USER}"
+          export TMPDIR="${RUNNER_TEMP}/tilelang-pytest-tail"
+          mkdir -p "${TMPDIR}"
+          chmod 700 "${TMPDIR}"
 
           TAIL_FILE="testing/python/language/test_tilelang_ascend_language_tail_block.py"
           TAIL_LOG="${GITHUB_WORKSPACE}/a3_tail_block_isolated.log"
@@ -292,6 +304,12 @@ jobs:
           source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
           source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
           source "${GITHUB_WORKSPACE}/set_env.sh"
+
+          export USER="$(id -un)"
+          export LOGNAME="${USER}"
+          export TMPDIR="${RUNNER_TEMP}/tilelang-pytest-operator"
+          mkdir -p "${TMPDIR}"
+          chmod 700 "${TMPDIR}"
 
           mapfile -t OPERATOR_TESTS < <(
             python scripts/ci/resolve_operator_tests.py list-tests |
