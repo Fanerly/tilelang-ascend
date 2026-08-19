@@ -18,7 +18,7 @@ jobs:
       - ARM64
       - tilelang-a3-canary
 
-    timeout-minutes: 180
+    timeout-minutes: 300
 
     steps:
       - name: Checkout selected branch
@@ -67,15 +67,29 @@ jobs:
 
           git submodule sync --recursive
 
-          git \
-            -c http.version=HTTP/1.1 \
-            -c http.lowSpeedLimit=1 \
-            -c http.lowSpeedTime=600 \
-            submodule update \
-            --init \
-            --recursive \
-            --jobs 2 \
-            --depth 1
+          SUBMODULE_OK=false
+
+          for attempt in 1 2 3; do
+            echo "Submodule attempt ${attempt}/3"
+
+            if git \
+              -c http.version=HTTP/1.1 \
+              -c http.lowSpeedLimit=1 \
+              -c http.lowSpeedTime=600 \
+              submodule update \
+              --init \
+              --recursive \
+              --jobs 2 \
+              --depth 1; then
+              SUBMODULE_OK=true
+              break
+            fi
+
+            echo "::warning::Submodule attempt ${attempt} failed"
+            sleep 5
+          done
+
+          test "${SUBMODULE_OK}" = true
 
           git submodule status --recursive \
             | tee a3_submodules.log
@@ -153,7 +167,7 @@ jobs:
           print("result:", result)
           PY
 
-      - name: Run GEMM benchmark group
+      - name: Run complete benchmark suite
         shell: bash
         run: |
           set -euo pipefail
@@ -167,10 +181,8 @@ jobs:
           cd examples
 
           set +e
-          bash bench_test.sh \
-            --skip-pytest \
-            --dirs gemm \
-            2>&1 | tee a3_bench_gemm.log
+          bash bench_test.sh --skip-pytest \
+            2>&1 | tee "${GITHUB_WORKSPACE}/a3_bench_full.log"
 
           BENCH_RC=${PIPESTATUS[0]}
           set -e
@@ -180,4 +192,138 @@ jobs:
 
           grep -E \
             'Total:|Passed:|Failed:|Pass rate:' \
-            a3_bench_gemm.log
+            "${GITHUB_WORKSPACE}/a3_bench_full.log"
+
+      - name: Run main pytest suite without fork
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "${GITHUB_WORKSPACE}"
+
+          source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
+          source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
+          source "${GITHUB_WORKSPACE}/set_env.sh"
+
+          TAIL_FILE="testing/python/language/test_tilelang_ascend_language_tail_block.py"
+
+          set +e
+          pytest testing/python/ \
+            --ignore="${TAIL_FILE}" \
+            -v \
+            -n 2 \
+            -m "not ci_skip" \
+            2>&1 | tee a3_pytest_main.log
+
+          PYTEST_RC=${PIPESTATUS[0]}
+          set -e
+
+          echo "MAIN_PYTEST_RC=${PYTEST_RC}"
+          test "${PYTEST_RC}" -eq 0
+
+      - name: Run tail block tests in isolated processes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "${GITHUB_WORKSPACE}"
+
+          source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
+          source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
+          source "${GITHUB_WORKSPACE}/set_env.sh"
+
+          TAIL_FILE="testing/python/language/test_tilelang_ascend_language_tail_block.py"
+          TAIL_LOG="${GITHUB_WORKSPACE}/a3_tail_block_isolated.log"
+
+          mapfile -t TAIL_NODES < <(
+            pytest --collect-only -q \
+              "${TAIL_FILE}" \
+              -m "not ci_skip" |
+              grep -F "${TAIL_FILE}::"
+          )
+
+          total=${#TAIL_NODES[@]}
+          passed=0
+          failed=0
+          FAILED_NODES=()
+
+          echo "Collected tail-block nodes: ${total}" | tee "${TAIL_LOG}"
+          test "${total}" -gt 0
+
+          index=0
+          for node in "${TAIL_NODES[@]}"; do
+            index=$((index + 1))
+            echo "[${index}/${total}] ${node}" | tee -a "${TAIL_LOG}"
+
+            if pytest -q \
+              "${node}" \
+              -m "not ci_skip" \
+              2>&1 | tee -a "${TAIL_LOG}"; then
+              passed=$((passed + 1))
+              echo "[PASSED] ${node}" | tee -a "${TAIL_LOG}"
+            else
+              failed=$((failed + 1))
+              FAILED_NODES+=("${node}")
+              echo "[FAILED] ${node}" | tee -a "${TAIL_LOG}"
+            fi
+          done
+
+          {
+            echo "======================================"
+            echo "Tail-block Isolated Summary"
+            echo "Total: ${total}"
+            echo "Passed: ${passed}"
+            echo "Failed: ${failed}"
+            echo "======================================"
+          } | tee -a "${TAIL_LOG}"
+
+          if [ "${failed}" -ne 0 ]; then
+            printf '[FAILED] %s\n' "${FAILED_NODES[@]}"
+            exit 1
+          fi
+
+      - name: Run operator tests without fork
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "${GITHUB_WORKSPACE}"
+
+          source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
+          source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
+          source "${GITHUB_WORKSPACE}/set_env.sh"
+
+          mapfile -t OPERATOR_TESTS < <(
+            python scripts/ci/resolve_operator_tests.py list-tests |
+              sed '/^[[:space:]]*$/d'
+          )
+
+          echo "Operator test files: ${#OPERATOR_TESTS[@]}"
+
+          if [ "${#OPERATOR_TESTS[@]}" -eq 0 ]; then
+            echo "No operator tests selected"
+            exit 0
+          fi
+
+          set +e
+          pytest "${OPERATOR_TESTS[@]}" \
+            -v \
+            -n 2 \
+            -m "not ci_skip" \
+            2>&1 | tee a3_operator_tests.log
+
+          OPERATOR_RC=${PIPESTATUS[0]}
+          set -e
+
+          echo "OPERATOR_RC=${OPERATOR_RC}"
+          test "${OPERATOR_RC}" -eq 0
+
+      - name: Upload A3 canary logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a3-full-canary-${{ github.run_id }}
+          path: |
+            a3_*.log
+          if-no-files-found: warn
+          retention-days: 7
