@@ -294,7 +294,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run operator tests without fork
+      - name: Run operator tests in isolated file processes
         shell: bash
         run: |
           set -euo pipefail
@@ -308,6 +308,7 @@ jobs:
           export USER="$(id -un)"
           export LOGNAME="${USER}"
           export TMPDIR="${RUNNER_TEMP}/tilelang-pytest-operator"
+
           mkdir -p "${TMPDIR}"
           chmod 700 "${TMPDIR}"
 
@@ -316,25 +317,71 @@ jobs:
               sed '/^[[:space:]]*$/d'
           )
 
-          echo "Operator test files: ${#OPERATOR_TESTS[@]}"
+          total_files=${#OPERATOR_TESTS[@]}
+          echo "Operator test files: ${total_files}"
 
-          if [ "${#OPERATOR_TESTS[@]}" -eq 0 ]; then
+          if [ "${total_files}" -eq 0 ]; then
             echo "No operator tests selected"
             exit 0
           fi
 
-          set +e
-          pytest "${OPERATOR_TESTS[@]}" \
-            -v \
-            -n 2 \
-            -m "not ci_skip" \
-            2>&1 | tee a3_operator_tests.log
+          : > a3_operator_tests.log
 
-          OPERATOR_RC=${PIPESTATUS[0]}
-          set -e
+          passed_files=0
+          failed_files=0
+          operator_rc=0
+          index=0
+          FAILED_FILES=()
 
-          echo "OPERATOR_RC=${OPERATOR_RC}"
-          test "${OPERATOR_RC}" -eq 0
+          for operator_test in "${OPERATOR_TESTS[@]}"; do
+            index=$((index + 1))
+
+            {
+              echo
+              echo "======================================"
+              echo "[${index}/${total_files}] ${operator_test}"
+              echo "======================================"
+            } | tee -a a3_operator_tests.log
+
+            set +e
+            pytest "${operator_test}" \
+              -v \
+              -m "not ci_skip" \
+              --basetemp="${TMPDIR}/file_${index}" \
+              2>&1 | tee -a a3_operator_tests.log
+
+            file_rc=${PIPESTATUS[0]}
+            set -e
+
+            if [ "${file_rc}" -eq 0 ]; then
+              passed_files=$((passed_files + 1))
+              echo "[PASSED FILE] ${operator_test}" |
+                tee -a a3_operator_tests.log
+            else
+              failed_files=$((failed_files + 1))
+              operator_rc=1
+              FAILED_FILES+=("${operator_test}")
+              echo "[FAILED FILE] ${operator_test}, rc=${file_rc}" |
+                tee -a a3_operator_tests.log
+            fi
+          done
+
+          {
+            echo
+            echo "======================================"
+            echo "Operator Per-file Summary"
+            echo "Total files: ${total_files}"
+            echo "Passed files: ${passed_files}"
+            echo "Failed files: ${failed_files}"
+            echo "OPERATOR_RC=${operator_rc}"
+            echo "======================================"
+
+            if [ "${failed_files}" -ne 0 ]; then
+              printf '[FAILED FILE] %s\n' "${FAILED_FILES[@]}"
+            fi
+          } | tee -a a3_operator_tests.log
+
+          test "${operator_rc}" -eq 0
 
       - name: Upload A3 canary logs
         if: always()
