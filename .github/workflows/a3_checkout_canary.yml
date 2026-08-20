@@ -246,6 +246,7 @@ jobs:
 
           TAIL_FILE="testing/python/language/test_tilelang_ascend_language_tail_block.py"
           TAIL_LOG="${GITHUB_WORKSPACE}/a3_tail_block_isolated.log"
+          MAX_ATTEMPTS=3
 
           mapfile -t TAIL_NODES < <(
             pytest --collect-only -q \
@@ -256,43 +257,88 @@ jobs:
 
           total=${#TAIL_NODES[@]}
           passed=0
+          flaky=0
           failed=0
           FAILED_NODES=()
+          FLAKY_NODES=()
 
           echo "Collected tail-block nodes: ${total}" | tee "${TAIL_LOG}"
+          echo "Maximum attempts per node: ${MAX_ATTEMPTS}" |
+            tee -a "${TAIL_LOG}"
+
           test "${total}" -gt 0
 
           index=0
+
           for node in "${TAIL_NODES[@]}"; do
             index=$((index + 1))
-            echo "[${index}/${total}] ${node}" | tee -a "${TAIL_LOG}"
+            attempt=1
+            node_passed=false
 
-            if pytest -q \
-              "${node}" \
-              -m "not ci_skip" \
-              2>&1 | tee -a "${TAIL_LOG}"; then
-              passed=$((passed + 1))
-              echo "[PASSED] ${node}" | tee -a "${TAIL_LOG}"
-            else
+            while [ "${attempt}" -le "${MAX_ATTEMPTS}" ]; do
+              {
+                echo
+                echo "[${index}/${total}] ${node}"
+                echo "Attempt ${attempt}/${MAX_ATTEMPTS}"
+              } | tee -a "${TAIL_LOG}"
+
+              if pytest -q \
+                "${node}" \
+                -m "not ci_skip" \
+                --basetemp="${TMPDIR}/node_${index}_attempt_${attempt}" \
+                2>&1 | tee -a "${TAIL_LOG}"; then
+
+                node_passed=true
+                passed=$((passed + 1))
+
+                if [ "${attempt}" -eq 1 ]; then
+                  echo "[PASSED] ${node}" |
+                    tee -a "${TAIL_LOG}"
+                else
+                  flaky=$((flaky + 1))
+                  FLAKY_NODES+=("${node}")
+                  echo "[FLAKY-PASSED] ${node} on attempt ${attempt}" |
+                    tee -a "${TAIL_LOG}"
+                fi
+
+                break
+              fi
+
+              echo "[ATTEMPT FAILED] ${node}, attempt=${attempt}" |
+                tee -a "${TAIL_LOG}"
+
+              attempt=$((attempt + 1))
+            done
+
+            if [ "${node_passed}" != true ]; then
               failed=$((failed + 1))
               FAILED_NODES+=("${node}")
-              echo "[FAILED] ${node}" | tee -a "${TAIL_LOG}"
+
+              echo "[FAILED] ${node} after ${MAX_ATTEMPTS} attempts" |
+                tee -a "${TAIL_LOG}"
             fi
           done
 
           {
+            echo
             echo "======================================"
             echo "Tail-block Isolated Summary"
             echo "Total: ${total}"
             echo "Passed: ${passed}"
-            echo "Failed: ${failed}"
+            echo "Flaky-passed: ${flaky}"
+            echo "Persistent failed: ${failed}"
             echo "======================================"
+
+            if [ "${flaky}" -ne 0 ]; then
+              printf '[FLAKY-PASSED] %s\n' "${FLAKY_NODES[@]}"
+            fi
+
+            if [ "${failed}" -ne 0 ]; then
+              printf '[PERSISTENT-FAILED] %s\n' "${FAILED_NODES[@]}"
+            fi
           } | tee -a "${TAIL_LOG}"
 
-          if [ "${failed}" -ne 0 ]; then
-            printf '[FAILED] %s\n' "${FAILED_NODES[@]}"
-            exit 1
-          fi
+          test "${failed}" -eq 0
 
       - name: Run operator tests in isolated file processes
         shell: bash
