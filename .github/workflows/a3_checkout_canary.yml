@@ -12,11 +12,7 @@ concurrency:
 
 jobs:
   host-checkout-canary:
-    runs-on:
-      - self-hosted
-      - Linux
-      - ARM64
-      - tilelang-a3-host-canary
+    runs-on: tilelang-a3-host-canary
 
     timeout-minutes: 20
 
