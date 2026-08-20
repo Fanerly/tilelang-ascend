@@ -25,7 +25,21 @@ CPUSET="${CI_CPUSET:-0-15}"
 
 P="a3_host"
 RUNTMP="$(mktemp -d "${TMPDIR:-/tmp}/a3host.XXXXXX")"
-trap 'rm -rf "${RUNTMP}"' EXIT
+
+# Run context written by the workflow step (github.run_id / job / matrix.validation_run).
+RUN_ID="unknown"
+VALIDATION_RUN="0"
+if [ -f "${REPO}/a3_host_run_ctx.env" ]; then
+  # shellcheck disable=SC1090
+  source "${REPO}/a3_host_run_ctx.env"
+fi
+
+# Persist logs outside the checkout so the next round's checkout clean cannot
+# wipe run-N evidence. Isolated by run_id + validation_run.
+LOG_DIR="/workspace/fzh/gha-fzh-log/a3-host-canary-r${RUN_ID}-n${VALIDATION_RUN}"
+mkdir -p "${LOG_DIR}"
+
+trap 'cp -f "${REPO}"/a3_host_*.log "${LOG_DIR}"/ 2>/dev/null || true; rm -rf "${RUNTMP}"' EXIT
 
 # ---------------------------------------------------------------------------
 # env snapshot
@@ -82,8 +96,24 @@ test "${PIPESTATUS[0]}" -eq 0
 # Phase 2: full clean build
 # ---------------------------------------------------------------------------
 echo "=== PHASE full build ==="
+export MAKEFLAGS="--output-sync=target"
+set +e
 taskset -c "${CPUSET}" bash install_ascend.sh 2>&1 | tee "${P}_build.log"
-test "${PIPESTATUS[0]}" -eq 0
+BUILD_RC=${PIPESTATUS[0]}
+set -e
+
+if [ "${BUILD_RC}" -ne 0 ]; then
+  echo "full build FAILED rc=${BUILD_RC}; running serial verbose diagnostic" | tee -a "${P}_build.log"
+  if [ -d "${REPO}/build" ]; then
+    ( cd "${REPO}/build" && \
+      MAKEFLAGS="--output-sync=target" make VERBOSE=1 -j1 2>&1 \
+      | tee "${REPO}/${P}_build_diag.log" ) || true
+  else
+    echo "no build directory for diagnostic" | tee "${REPO}/${P}_build_diag.log"
+  fi
+  echo "diagnostic done; returning original build rc=${BUILD_RC}"
+  exit "${BUILD_RC}"
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 3: verify tilelang/tvm resolve to the current checkout (not stable repo)

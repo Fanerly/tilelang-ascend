@@ -16,6 +16,15 @@ jobs:
 
     timeout-minutes: 240
 
+    env:
+      GIT_CONFIG_COUNT: "3"
+      GIT_CONFIG_KEY_0: http.version
+      GIT_CONFIG_VALUE_0: HTTP/1.1
+      GIT_CONFIG_KEY_1: http.lowSpeedLimit
+      GIT_CONFIG_VALUE_1: "1"
+      GIT_CONFIG_KEY_2: http.lowSpeedTime
+      GIT_CONFIG_VALUE_2: "600"
+
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -24,11 +33,35 @@ jobs:
 
     steps:
       - name: Checkout selected branch
+        id: checkout
         uses: actions/checkout@v7
         with:
           fetch-depth: 1
           submodules: false
           persist-credentials: false
+        continue-on-error: true
+
+      - name: Retry checkout on network failure
+        if: steps.checkout.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_url="https://github.com/${GITHUB_REPOSITORY}.git"
+          git init -q 2>/dev/null || true
+          git remote set-url origin "${remote_url}" 2>/dev/null || git remote add origin "${remote_url}"
+          for attempt in 1 2 3; do
+            echo "checkout retry ${attempt}/3"
+            if git -c http.version=HTTP/1.1 -c http.lowSpeedLimit=1 -c http.lowSpeedTime=600 \
+              fetch --depth=1 --no-tags origin "+${GITHUB_REF}:refs/remotes/origin/canary" && \
+              git checkout -f "${GITHUB_SHA}"; then
+              echo "checkout OK on retry ${attempt}"
+              exit 0
+            fi
+            echo "checkout attempt ${attempt} failed"
+            sleep 10
+          done
+          echo "::error::checkout failed after 3 attempts"
+          exit 1
 
       - name: Verify host runner configuration
         shell: bash
@@ -51,6 +84,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cat > "${GITHUB_WORKSPACE}/a3_host_run_ctx.env" <<EOF
+          RUN_ID=${GITHUB_RUN_ID}
+          JOB=${GITHUB_JOB}
+          VALIDATION_RUN=${{ matrix.validation_run }}
+          EOF
           sudo -n /usr/local/sbin/tl_fzh-docker-exec run \
             "${GITHUB_WORKSPACE}" a3_host_full_canary.sh
 
