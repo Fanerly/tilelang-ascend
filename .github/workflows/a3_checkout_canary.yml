@@ -1,4 +1,4 @@
-name: A3 Checkout Full Canary
+name: A3 Host Checkout Canary
 
 on:
   workflow_dispatch:
@@ -7,18 +7,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: a3-checkout-full-canary
+  group: a3-host-checkout-canary
   cancel-in-progress: false
 
 jobs:
-  checkout-full-build:
+  host-checkout-canary:
     runs-on:
       - self-hosted
       - Linux
       - ARM64
-      - tilelang-a3-canary
+      - tilelang-a3-host-canary
 
-    timeout-minutes: 300
+    timeout-minutes: 20
 
     steps:
       - name: Checkout selected branch
@@ -28,413 +28,60 @@ jobs:
           submodules: false
           persist-credentials: false
 
-      - name: Verify runner configuration
+      - name: Verify host runner configuration
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "runner=${RUNNER_NAME}"
-          echo "arch=$(uname -m)"
+          echo "RUNNER_NAME=${RUNNER_NAME}"
           echo "user=$(whoami)"
+          echo "arch=$(uname -m)"
           echo "workspace=${GITHUB_WORKSPACE}"
-          echo "commit=${GITHUB_SHA}"
-          echo "branch=${GITHUB_REF_NAME}"
-          echo "mode=${CI_EXECUTION_MODE:-unset}"
-          echo "container=${CI_CONTAINER_NAME:-unset}"
-
-          test "$(whoami)" = "runner-fzh"
+          test "${RUNNER_NAME}" = "tilelang-a3-host-canary-fzh"
+          test "$(whoami)" = "gha-fzh"
           test "$(uname -m)" = "aarch64"
-          test "${CI_EXECUTION_MODE:-}" = "direct"
-          test -n "${CI_CONTAINER_NAME:-}"
-          test -n "${CI_CPUSET:-}"
-          test -n "${ASCEND_RT_VISIBLE_DEVICES:-}"
-          test -n "${PIP_CONSTRAINT:-}"
-          test -f "${PIP_CONSTRAINT}"
+          case "${GITHUB_WORKSPACE}" in
+            /data/workspace/fzh/actions-runner-host-canary/_work/*) ;;
+            *) echo "unexpected workspace: ${GITHUB_WORKSPACE}"; exit 1 ;;
+          esac
+          test "$(sudo -n /usr/local/sbin/tl_fzh-docker-exec status)" = "running"
 
-          echo "Fixed device whitelist: configured"
-          echo "CPU limit: configured"
-
-      - name: Initialize recursive submodules
+      - name: Run in-container probe (NPU + TileLang + GEMM)
         shell: bash
         run: |
           set -euo pipefail
-
-          cd "${GITHUB_WORKSPACE}"
-
-          git config --local http.version HTTP/1.1
-          git config --local http.lowSpeedLimit 1
-          git config --local http.lowSpeedTime 600
-
-          git submodule sync --recursive
-
-          SUBMODULE_OK=false
-
-          for attempt in 1 2 3; do
-            echo "Submodule attempt ${attempt}/3"
-
-            if git \
-              -c http.version=HTTP/1.1 \
-              -c http.lowSpeedLimit=1 \
-              -c http.lowSpeedTime=600 \
-              submodule update \
-              --init \
-              --recursive \
-              --jobs 2 \
-              --depth 1; then
-              SUBMODULE_OK=true
-              break
-            fi
-
-            echo "::warning::Submodule attempt ${attempt} failed"
-            sleep 5
-          done
-
-          test "${SUBMODULE_OK}" = true
-
-          git submodule status --recursive \
-            | tee a3_submodules.log
-
-          if git submodule status --recursive | grep -Eq '^[-+]'; then
-            echo "Submodule state is incomplete or mismatched"
-            exit 1
-          fi
-
-      - name: Full build current checkout
-        shell: bash
-        run: |
+          cat > "${GITHUB_WORKSPACE}/host_probe.sh" <<'PROBE'
+          #!/bin/bash
           set -euo pipefail
-
-          cd "${GITHUB_WORKSPACE}"
-
           source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
           source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
-
-          echo "python=$(which python)"
-          echo "CANN=${ASCEND_HOME_PATH}"
-          echo "Full build with runner CPU limit"
-
-          set +e
-          taskset -c "${CI_CPUSET}" \
-            bash install_ascend.sh \
-            2>&1 | tee a3_full_build.log
-
-          BUILD_RC=${PIPESTATUS[0]}
-          set -e
-
-          echo "BUILD_RC=${BUILD_RC}"
-          test "${BUILD_RC}" -eq 0
-
-      - name: Verify current checkout installation
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "${GITHUB_WORKSPACE}"
-
-          source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
-          source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
-          source "${GITHUB_WORKSPACE}/set_env.sh"
-
-          python - <<'PY'
+          export PYTHONPATH="/workspace/fzh/tilelang-ascend${PYTHONPATH:+:$PYTHONPATH}"
+          export ACL_OP_INIT_MODE=1
+          echo "id=$(id -u):$(id -g) uname=$(id -un) gname=$(id -gn)"
+          echo "HOME=$HOME USER=$USER LOGNAME=$LOGNAME TMPDIR=$TMPDIR"
+          echo "ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-<unset>}"
+          python3 - <<'PY'
           import os
-          import tilelang
-          import tvm
           import torch
           import torch_npu
-
-          workspace = os.path.realpath(os.environ["GITHUB_WORKSPACE"])
-          tilelang_path = os.path.realpath(tilelang.__file__)
-          tvm_path = os.path.realpath(tvm.__file__)
-
-          print("workspace:", workspace)
-          print("TileLang:", tilelang_path)
-          print("TVM:", tvm_path)
-          print("torch:", torch.__version__)
-          print("torch_npu:", torch_npu.__version__)
-          print("NPU available:", torch.npu.is_available())
-          print("visible devices:", torch.npu.device_count())
-
-          assert tilelang_path.startswith(workspace + os.sep)
-          assert tvm_path.startswith(workspace + os.sep)
-          assert torch.npu.is_available()
+          import tilelang
+          assert os.environ.get("ASCEND_RT_VISIBLE_DEVICES") == "0"
+          assert torch.npu.is_available() is True
           assert torch.npu.device_count() == 1
-
           torch.npu.set_device(0)
-          x = torch.arange(4, dtype=torch.float32).npu()
-          result = (x + 1).cpu()
-          torch.npu.synchronize()
-
-          print("result:", result)
+          x = torch.arange(8, dtype=torch.float32).npu()
+          print("tensor_result", (x + 1).cpu().tolist())
+          print("tilelang", tilelang.__file__)
+          print("torch_npu", torch_npu.__version__)
           PY
+          python3 /workspace/fzh/tilelang-ascend/examples/gemm/example_gemm.py --m 512 --n 512 --k 512
+          echo "PROBE_OK"
+          PROBE
+          chmod +x "${GITHUB_WORKSPACE}/host_probe.sh"
+          sudo -n /usr/local/sbin/tl_fzh-docker-exec run "${GITHUB_WORKSPACE}" host_probe.sh
 
-      - name: Run complete benchmark suite
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "${GITHUB_WORKSPACE}"
-
-          source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
-          source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
-          source "${GITHUB_WORKSPACE}/set_env.sh"
-
-          cd examples
-
-          set +e
-          bash bench_test.sh --skip-pytest \
-            2>&1 | tee "${GITHUB_WORKSPACE}/a3_bench_full.log"
-
-          BENCH_RC=${PIPESTATUS[0]}
-          set -e
-
-          echo "BENCH_RC=${BENCH_RC}"
-          test "${BENCH_RC}" -eq 0
-
-          grep -E \
-            'Total:|Passed:|Failed:|Pass rate:' \
-            "${GITHUB_WORKSPACE}/a3_bench_full.log"
-
-      - name: Run main pytest suite without fork
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "${GITHUB_WORKSPACE}"
-
-          source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
-          source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
-          source "${GITHUB_WORKSPACE}/set_env.sh"
-
-          export USER="$(id -un)"
-          export LOGNAME="${USER}"
-          export TMPDIR="${RUNNER_TEMP}/tilelang-pytest-main"
-          mkdir -p "${TMPDIR}"
-          chmod 700 "${TMPDIR}"
-
-          TAIL_FILE="testing/python/language/test_tilelang_ascend_language_tail_block.py"
-
-          set +e
-          pytest testing/python/ \
-            --ignore="${TAIL_FILE}" \
-            -v \
-            -n 2 \
-            -m "not ci_skip" \
-            2>&1 | tee a3_pytest_main.log
-
-          PYTEST_RC=${PIPESTATUS[0]}
-          set -e
-
-          echo "MAIN_PYTEST_RC=${PYTEST_RC}"
-          test "${PYTEST_RC}" -eq 0
-
-      - name: Run tail block tests in isolated processes
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "${GITHUB_WORKSPACE}"
-
-          source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
-          source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
-          source "${GITHUB_WORKSPACE}/set_env.sh"
-
-          export USER="$(id -un)"
-          export LOGNAME="${USER}"
-          export TMPDIR="${RUNNER_TEMP}/tilelang-pytest-tail"
-          mkdir -p "${TMPDIR}"
-          chmod 700 "${TMPDIR}"
-
-          TAIL_FILE="testing/python/language/test_tilelang_ascend_language_tail_block.py"
-          TAIL_LOG="${GITHUB_WORKSPACE}/a3_tail_block_isolated.log"
-          MAX_ATTEMPTS=3
-
-          mapfile -t TAIL_NODES < <(
-            pytest --collect-only -q \
-              "${TAIL_FILE}" \
-              -m "not ci_skip" |
-              grep -F "${TAIL_FILE}::"
-          )
-
-          total=${#TAIL_NODES[@]}
-          passed=0
-          flaky=0
-          failed=0
-          FAILED_NODES=()
-          FLAKY_NODES=()
-
-          echo "Collected tail-block nodes: ${total}" | tee "${TAIL_LOG}"
-          echo "Maximum attempts per node: ${MAX_ATTEMPTS}" |
-            tee -a "${TAIL_LOG}"
-
-          test "${total}" -gt 0
-
-          index=0
-
-          for node in "${TAIL_NODES[@]}"; do
-            index=$((index + 1))
-            attempt=1
-            node_passed=false
-
-            while [ "${attempt}" -le "${MAX_ATTEMPTS}" ]; do
-              {
-                echo
-                echo "[${index}/${total}] ${node}"
-                echo "Attempt ${attempt}/${MAX_ATTEMPTS}"
-              } | tee -a "${TAIL_LOG}"
-
-              if pytest -q \
-                "${node}" \
-                -m "not ci_skip" \
-                --basetemp="${TMPDIR}/node_${index}_attempt_${attempt}" \
-                2>&1 | tee -a "${TAIL_LOG}"; then
-
-                node_passed=true
-                passed=$((passed + 1))
-
-                if [ "${attempt}" -eq 1 ]; then
-                  echo "[PASSED] ${node}" |
-                    tee -a "${TAIL_LOG}"
-                else
-                  flaky=$((flaky + 1))
-                  FLAKY_NODES+=("${node}")
-                  echo "[FLAKY-PASSED] ${node} on attempt ${attempt}" |
-                    tee -a "${TAIL_LOG}"
-                fi
-
-                break
-              fi
-
-              echo "[ATTEMPT FAILED] ${node}, attempt=${attempt}" |
-                tee -a "${TAIL_LOG}"
-
-              attempt=$((attempt + 1))
-            done
-
-            if [ "${node_passed}" != true ]; then
-              failed=$((failed + 1))
-              FAILED_NODES+=("${node}")
-
-              echo "[FAILED] ${node} after ${MAX_ATTEMPTS} attempts" |
-                tee -a "${TAIL_LOG}"
-            fi
-          done
-
-          {
-            echo
-            echo "======================================"
-            echo "Tail-block Isolated Summary"
-            echo "Total: ${total}"
-            echo "Passed: ${passed}"
-            echo "Flaky-passed: ${flaky}"
-            echo "Persistent failed: ${failed}"
-            echo "======================================"
-
-            if [ "${flaky}" -ne 0 ]; then
-              printf '[FLAKY-PASSED] %s\n' "${FLAKY_NODES[@]}"
-            fi
-
-            if [ "${failed}" -ne 0 ]; then
-              printf '[PERSISTENT-FAILED] %s\n' "${FAILED_NODES[@]}"
-            fi
-          } | tee -a "${TAIL_LOG}"
-
-          test "${failed}" -eq 0
-
-      - name: Run operator tests in isolated file processes
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "${GITHUB_WORKSPACE}"
-
-          source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
-          source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
-          source "${GITHUB_WORKSPACE}/set_env.sh"
-
-          export USER="$(id -un)"
-          export LOGNAME="${USER}"
-          export TMPDIR="${RUNNER_TEMP}/tilelang-pytest-operator"
-
-          mkdir -p "${TMPDIR}"
-          chmod 700 "${TMPDIR}"
-
-          mapfile -t OPERATOR_TESTS < <(
-            python scripts/ci/resolve_operator_tests.py list-tests |
-              sed '/^[[:space:]]*$/d'
-          )
-
-          total_files=${#OPERATOR_TESTS[@]}
-          echo "Operator test files: ${total_files}"
-
-          if [ "${total_files}" -eq 0 ]; then
-            echo "No operator tests selected"
-            exit 0
-          fi
-
-          : > a3_operator_tests.log
-
-          passed_files=0
-          failed_files=0
-          operator_rc=0
-          index=0
-          FAILED_FILES=()
-
-          for operator_test in "${OPERATOR_TESTS[@]}"; do
-            index=$((index + 1))
-
-            {
-              echo
-              echo "======================================"
-              echo "[${index}/${total_files}] ${operator_test}"
-              echo "======================================"
-            } | tee -a a3_operator_tests.log
-
-            set +e
-            pytest "${operator_test}" \
-              -v \
-              -m "not ci_skip" \
-              --basetemp="${TMPDIR}/file_${index}" \
-              2>&1 | tee -a a3_operator_tests.log
-
-            file_rc=${PIPESTATUS[0]}
-            set -e
-
-            if [ "${file_rc}" -eq 0 ]; then
-              passed_files=$((passed_files + 1))
-              echo "[PASSED FILE] ${operator_test}" |
-                tee -a a3_operator_tests.log
-            else
-              failed_files=$((failed_files + 1))
-              operator_rc=1
-              FAILED_FILES+=("${operator_test}")
-              echo "[FAILED FILE] ${operator_test}, rc=${file_rc}" |
-                tee -a a3_operator_tests.log
-            fi
-          done
-
-          {
-            echo
-            echo "======================================"
-            echo "Operator Per-file Summary"
-            echo "Total files: ${total_files}"
-            echo "Passed files: ${passed_files}"
-            echo "Failed files: ${failed_files}"
-            echo "OPERATOR_RC=${operator_rc}"
-            echo "======================================"
-
-            if [ "${failed_files}" -ne 0 ]; then
-              printf '[FAILED FILE] %s\n' "${FAILED_FILES[@]}"
-            fi
-          } | tee -a a3_operator_tests.log
-
-          test "${operator_rc}" -eq 0
-
-      - name: Upload A3 canary logs
+      - name: Cleanup probe
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: a3-full-canary-${{ github.run_id }}
-          path: |
-            a3_*.log
-          if-no-files-found: warn
-          retention-days: 7
+        shell: bash
+        run: |
+          rm -f "${GITHUB_WORKSPACE}/host_probe.sh"
+          rm -rf "${GITHUB_WORKSPACE}/.pkl_memoize_py3"
