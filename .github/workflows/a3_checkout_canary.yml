@@ -48,28 +48,57 @@ jobs:
           cat > "${GITHUB_WORKSPACE}/host_probe.sh" <<'PROBE'
           #!/bin/bash
           set -euo pipefail
+
+          STABLE_REPO=/workspace/fzh/tilelang-ascend
+          export STABLE_REPO
+
+          test -f "${STABLE_REPO}/set_env.sh"
+          test -f "${STABLE_REPO}/3rdparty/tvm/python/tvm/__init__.py"
+          test -f "${STABLE_REPO}/build/tvm/libtvm.so"
+
           source /usr/local/Ascend/cann-9.1.0-beta.1/set_env.sh
           source /workspace/fzh/venvs/tilelang-a3-py312/bin/activate
-          export PYTHONPATH="/workspace/fzh/tilelang-ascend${PYTHONPATH:+:$PYTHONPATH}"
+
+          cd "${STABLE_REPO}"
+          source "${STABLE_REPO}/set_env.sh"
           export ACL_OP_INIT_MODE=1
+
           echo "id=$(id -u):$(id -g) uname=$(id -un) gname=$(id -gn)"
           echo "HOME=$HOME USER=$USER LOGNAME=$LOGNAME TMPDIR=$TMPDIR"
           echo "ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-<unset>}"
+          echo "STABLE_REPO=${STABLE_REPO}"
+
           python3 - <<'PY'
           import os
           import torch
           import torch_npu
           import tilelang
+          import tvm
+
+          stable = os.path.realpath(os.environ["STABLE_REPO"])
+          tilelang_path = os.path.realpath(tilelang.__file__)
+          tvm_path = os.path.realpath(tvm.__file__)
+
           assert os.environ.get("ASCEND_RT_VISIBLE_DEVICES") == "0"
           assert torch.npu.is_available() is True
           assert torch.npu.device_count() == 1
+
           torch.npu.set_device(0)
           x = torch.arange(8, dtype=torch.float32).npu()
           print("tensor_result", (x + 1).cpu().tolist())
-          print("tilelang", tilelang.__file__)
+          print("tilelang", tilelang_path)
+          print("tvm", tvm_path)
           print("torch_npu", torch_npu.__version__)
+
+          assert tilelang_path.startswith(stable + os.sep), "tilelang NOT from STABLE_REPO"
+          assert tvm_path.startswith(stable + os.sep), "tvm NOT from STABLE_REPO"
+          print("IMPORT_OK")
           PY
-          python3 /workspace/fzh/tilelang-ascend/examples/gemm/example_gemm.py --m 512 --n 512 --k 512
+
+          # GEMM 从 STABLE_REPO 示例执行，在可写 TMPDIR 下运行以避免污染 root 所有的稳定仓库
+          cd "${TMPDIR}"
+          python3 "${STABLE_REPO}/examples/gemm/example_gemm.py" --m 512 --n 512 --k 512
+
           echo "PROBE_OK"
           PROBE
           chmod +x "${GITHUB_WORKSPACE}/host_probe.sh"
