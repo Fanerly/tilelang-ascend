@@ -50,7 +50,7 @@ jobs:
           JOB=${GITHUB_JOB}
           VALIDATION_RUN=1
           EOF
-          scripts/ci/ci_exec_adapter.sh "${GITHUB_WORKSPACE}/a3_host_full_canary.sh"
+          bash scripts/ci/ci_exec_adapter.sh "${GITHUB_WORKSPACE}/a3_host_full_canary.sh"
 
       - name: Upload logs
         if: always()
