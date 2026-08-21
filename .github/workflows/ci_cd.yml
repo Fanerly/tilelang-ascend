@@ -628,6 +628,9 @@ jobs:
             PYTEST_MARKERS="not (low_priority or ci_skip)"
           fi
 
+          # Container name is parameterized for multi-environment scheduling; the
+          # A2 runner keeps the legacy default when CI_CONTAINER_NAME is unset.
+          CONTAINER="${CI_CONTAINER_NAME:-tilelang_x1}"
           docker exec \
             -w $GITHUB_WORKSPACE \
             -e GITHUB_ENV=$GITHUB_ENV \
@@ -641,7 +644,7 @@ jobs:
             -e RUN_EXAMPLES="$RUN_EXAMPLES" \
             -e RUN_PYTEST_ONLY="$RUN_PYTEST_ONLY" \
             -e PYTEST_MARKERS="$PYTEST_MARKERS" \
-            tilelang_x1 \
+            "${CONTAINER}" \
             bash -c "
               set -e
 
