@@ -75,7 +75,7 @@ echo "=== PHASE submodule ==="
       -c http.version=HTTP/1.1 \
       -c http.lowSpeedLimit=1 \
       -c http.lowSpeedTime=600 \
-      submodule update --init --recursive --jobs 2 --depth 1; then
+      submodule update --init --recursive --jobs 2; then
       SUBMODULE_OK=true
       break
     fi
@@ -86,6 +86,13 @@ echo "=== PHASE submodule ==="
   git submodule status --recursive | tee "${P}_submodules.log"
   if git submodule status --recursive | grep -Eq '^[-+]'; then
     echo "submodule state incomplete or mismatched"
+    exit 1
+  fi
+  # Shallow (--depth) clones can leave a nested submodule's working tree empty
+  # while its commit is fetched. The build then fails with "configure: No such
+  # file". Guard with a concrete file the tvm build requires.
+  if [ ! -f "3rdparty/tvm/3rdparty/libbacktrace/configure" ]; then
+    echo "nested submodule 3rdparty/tvm/3rdparty/libbacktrace not checked out"
     exit 1
   fi
   echo "SUBMODULE_OK"
