@@ -714,7 +714,7 @@ jobs:
       
       # 全量编 | 增量编但无缓存，需要保存缓存
       - name: Save build cache
-        if: always() && github.event_name != 'pull_request' && (env.FULL_BUILD == 'true' || steps.cache-build.outputs.cache-hit == 'false')
+        if: always() && (env.FULL_BUILD == 'true' || steps.cache-build.outputs.cache-hit == 'false')
         continue-on-error: true    # key 已存在时不报错
         uses: actions/cache/save@v4
         with:
@@ -861,6 +861,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     if: always() && github.event_name == 'schedule'
+    permissions:
+      issues: write
     steps:
       - name: Get test artifacts
         uses: actions/download-artifact@v4
