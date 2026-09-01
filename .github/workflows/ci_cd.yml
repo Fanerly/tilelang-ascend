@@ -37,6 +37,11 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
+  statuses: write
+  checks: write
+  actions: write
+  issues: write
 
 concurrency:
   # PR 场景（含 pull_request 和 /re-test）：统一按 PR 号分组，新运行自动取消旧运行
@@ -49,10 +54,6 @@ jobs:
   check_changes:
     name: Check PR Status and Changes
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: write
-      actions: write
     outputs:
       merged: ${{ steps.pr_info.outputs.merged || steps.pr_status.outputs.merged || steps.default_changes.outputs.merged }}
       test_dirs: ${{ steps.detect_changes.outputs.test_dirs || steps.default_changes.outputs.test_dirs }}
@@ -476,9 +477,6 @@ jobs:
     name: Full CI Tests (A2/A3 shared pool)
     runs-on: [self-hosted, Linux, tilelang-ascend-ci]
     needs: check_changes
-    permissions:
-      contents: read
-      actions: write
     outputs:
       pass_rate: ${{ steps.check_results.outputs.pass_rate }}
       test_status: ${{ steps.check_results.outputs.test_status }}
@@ -866,9 +864,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     if: always() && github.event_name == 'schedule'
-    permissions:
-      issues: write
-      actions: read
     steps:
       - name: Get test artifacts
         uses: actions/download-artifact@v4
