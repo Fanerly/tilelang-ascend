@@ -19,6 +19,24 @@ fi
 : "${GITHUB_ENV:=ci_exec_env_out.env}"
 : "${GITHUB_OUTPUT:=ci_exec_output.env}"
 
+# Channel-adaptation guard: upstream originally passed these eight values with
+# `docker exec -e ...`, so they were always DEFINED (possibly empty). The
+# adapter delivers them via the env file above or via the execution environment.
+# Require definition (not non-emptyness) so that legal empty strings keep
+# working, and fail instead of silently running no tests.
+: "${INCREMENTAL_FLAG?ci_exec: INCREMENTAL_FLAG is not defined}"
+: "${SKIP_PYTEST?ci_exec: SKIP_PYTEST is not defined}"
+: "${TEST_DIRS_ARG?ci_exec: TEST_DIRS_ARG is not defined}"
+: "${EXPERIMENT_DIRS_ARG?ci_exec: EXPERIMENT_DIRS_ARG is not defined}"
+: "${PYTEST_FILES_ARG?ci_exec: PYTEST_FILES_ARG is not defined}"
+: "${RUN_EXAMPLES?ci_exec: RUN_EXAMPLES is not defined}"
+: "${RUN_PYTEST_ONLY?ci_exec: RUN_PYTEST_ONLY is not defined}"
+: "${PYTEST_MARKERS?ci_exec: PYTEST_MARKERS is not defined}"
+if [ "$RUN_PYTEST_ONLY" != "true" ] && [ "$RUN_EXAMPLES" != "true" ]; then
+  echo "ci_exec: neither RUN_PYTEST_ONLY nor RUN_EXAMPLES is true; no tests selected" >&2
+  exit 1
+fi
+
 # The execution channel is responsible for activating the venv + CANN:
 #   A2 legacy: docker exec -e BASH_ENV=/root/.bashrc
 #   A3 host-wrapper: root-owned bootstrap sourced via BASH_ENV by the wrapper

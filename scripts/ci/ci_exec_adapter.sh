@@ -33,8 +33,14 @@ case "${MODE}" in
     TMP_SCRIPT="ci_exec_${GITHUB_RUN_ID:-0}_$$.sh"
     cp "${SCRIPT}" "${WS}/${TMP_SCRIPT}"
     chmod +x "${WS}/${TMP_SCRIPT}"
+    # `exec` would replace this shell and skip the EXIT trap on success, leaking
+    # the workspace temp script. Run the wrapper, keep its real exit code and
+    # clean up explicitly on both success and failure.
     trap 'rm -f "${WS}/${TMP_SCRIPT}"' EXIT
-    exec sudo -n "${WRAPPER}" run "${WS}" "${TMP_SCRIPT}"
+    rc=0
+    sudo -n "${WRAPPER}" run "${WS}" "${TMP_SCRIPT}" || rc=$?
+    rm -f "${WS}/${TMP_SCRIPT}"
+    exit "${rc}"
     ;;
   *)
     echo "ci_exec_adapter: unknown CI_EXECUTION_MODE=${MODE}" >&2
