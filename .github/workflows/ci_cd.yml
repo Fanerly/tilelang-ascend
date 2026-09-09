@@ -628,12 +628,214 @@ jobs:
             PYTEST_MARKERS="not (low_priority or ci_skip)"
           fi
 
-          NPU_DEVICE_ARGS=()
-
+          # === A3 multi-card pytest sharding (ascend_cicd_a3 only) ===
           if [[ "${RUNNER_NAME:-}" == "ascend_cicd_a3" ]]; then
-            NPU_DEVICE_ARGS+=(-e "ASCEND_RT_VISIBLE_DEVICES=0")
-            echo "A3 runner detected: limiting Ascend runtime visibility to logical device 0"
-          fi
+            # Trusted device list: runner-local env first, repo-level Actions variable second.
+            A3_DEVICE_LIST="${A3_CI_DEVICE_LIST:-${{ vars.A3_CI_DEVICE_LIST }}}"
+            if [[ -z "${A3_DEVICE_LIST}" ]]; then
+              echo "::error::A3 multi-card device list is missing. Set repository variable A3_CI_DEVICE_LIST (comma-separated non-negative integers, e.g. '0,1,2,3') or export A3_CI_DEVICE_LIST on the ascend_cicd_a3 runner."
+              exit 1
+            fi
+
+            A3_DEVICES=()
+            IFS=',' read -ra A3_RAW_DEVS <<< "${A3_DEVICE_LIST}"
+            for dev in "${A3_RAW_DEVS[@]}"; do
+              if [[ ! "${dev}" =~ ^[0-9]+$ ]]; then
+                echo "::error::A3_CI_DEVICE_LIST contains non-integer entry '${dev}'."
+                exit 1
+              fi
+              for existing in "${A3_DEVICES[@]}"; do
+                if [[ "${existing}" == "${dev}" ]]; then
+                  echo "::error::A3_CI_DEVICE_LIST contains duplicate device '${dev}'."
+                  exit 1
+                fi
+              done
+              A3_DEVICES+=("${dev}")
+            done
+            if [[ ${#A3_DEVICES[@]} -eq 0 ]]; then
+              echo "::error::A3 device list is empty after validation."
+              exit 1
+            fi
+            NUM_SHARDS=${#A3_DEVICES[@]}
+            echo "A3 multi-card mode: ${NUM_SHARDS} device(s) -> ${A3_DEVICES[*]}"
+
+            # ---- Build once (device 0 visible, same as single-card path) ----
+            docker exec \
+              -e ASCEND_RT_VISIBLE_DEVICES=0 \
+              -w "$GITHUB_WORKSPACE" \
+              -e GITHUB_ENV="$GITHUB_ENV" \
+              -e GITHUB_OUTPUT="$GITHUB_OUTPUT" \
+              -e BASH_ENV=/root/.bashrc \
+              -e INCREMENTAL_FLAG="$INCREMENTAL_FLAG" \
+              tilelang_x1 \
+              bash -c "
+                set -e
+
+                # 如果有缓存，复制到 build 目录
+                if [ -d build-cache ] && [ \"\$(ls -A build-cache)\" ]; then
+                  echo \"Copy build cache...\"
+                  mkdir -p build
+                  cp -ra build-cache/* build/
+                fi
+
+                # 增量编译项目
+                bash install_ascend.sh \$INCREMENTAL_FLAG
+                # 保存编译产物
+                if [ -d \"build\" ]; then
+                  echo \"Saving build artifacts...\"
+                  rm -rf build-cache/*
+                  cp -ra build/* build-cache/
+                fi
+
+                # 加载环境变量
+                echo 'Sourcing environment...'
+                source set_env.sh
+                echo 'TILELANG_PATH='\$PWD >> \"\$GITHUB_ENV\"
+              "
+
+            # ---- Collect pytest targets (deterministic, file-based sharding) ----
+            SHARD_TARGETS=()
+            SHARD_MODE=""
+            if [ "${RUN_PYTEST_ONLY}" = true ]; then
+              SHARD_MODE="pytest_only"
+              if [ -n "${PYTEST_FILES_ARG}" ]; then
+                for tf in ${PYTEST_FILES_ARG}; do
+                  SHARD_TARGETS+=("${GITHUB_WORKSPACE}/${tf}")
+                done
+              else
+                while IFS= read -r tf; do
+                  [ -n "${tf}" ] && SHARD_TARGETS+=("${tf}")
+                done < <(find "${GITHUB_WORKSPACE}/testing/python" -name 'test_*.py' -print | sort)
+              fi
+            elif [ "${RUN_EXAMPLES}" = true ]; then
+              SHARD_MODE="examples"
+              if [ "${SKIP_PYTEST_VALUE}" != "true" ]; then
+                while IFS= read -r tf; do
+                  [ -n "${tf}" ] && SHARD_TARGETS+=("${tf}")
+                done < <(find "${GITHUB_WORKSPACE}/testing/python" -name 'test_*.py' -print | sort)
+              fi
+              while IFS= read -r ot; do
+                [ -n "${ot}" ] && SHARD_TARGETS+=("${GITHUB_WORKSPACE}/${ot}")
+              done < <(python3 "${GITHUB_WORKSPACE}/scripts/ci/resolve_operator_tests.py" list-tests ${TEST_DIRS_ARG} ${EXPERIMENT_DIRS_ARG})
+            fi
+
+            echo "A3 total collected pytest file(s): ${#SHARD_TARGETS[@]}"
+
+            mkdir -p "${GITHUB_WORKSPACE}/.a3_shards"
+            for ((i=0; i<${#SHARD_TARGETS[@]}; i++)); do
+              idx=$((i % NUM_SHARDS))
+              printf '%s\n' "${SHARD_TARGETS[$i]}" >> "${GITHUB_WORKSPACE}/.a3_shards/shard-${idx}.lst"
+            done
+            for ((i=0; i<NUM_SHARDS; i++)); do
+              cnt=0
+              [ -f "${GITHUB_WORKSPACE}/.a3_shards/shard-$i.lst" ] && cnt=$(wc -l < "${GITHUB_WORKSPACE}/.a3_shards/shard-$i.lst")
+              echo "A3 shard-$i: ${cnt} test file(s)"
+            done
+
+            BENCH_EXIT=0
+
+            # ---- Benchmark (serial, device 0) belongs only to RUN_EXAMPLES ----
+            if [ "${RUN_EXAMPLES}" = true ]; then
+              echo "A3: running benchmark serially on device 0"
+              set +e
+              docker exec \
+                -e ASCEND_RT_VISIBLE_DEVICES=0 \
+                -w "$GITHUB_WORKSPACE" \
+                -e BASH_ENV=/root/.bashrc \
+                -e TEST_DIRS_ARG="$TEST_DIRS_ARG" \
+                -e EXPERIMENT_DIRS_ARG="$EXPERIMENT_DIRS_ARG" \
+                tilelang_x1 \
+                bash -c "
+                  set -e
+                  source set_env.sh
+                  cd examples
+                  chmod +x bench_test.sh
+                  ./bench_test.sh --skip-pytest \$TEST_DIRS_ARG \$EXPERIMENT_DIRS_ARG
+                " 2>&1 | tee "${GITHUB_WORKSPACE}/examples/test_output.log"
+              BENCH_EXIT=${PIPESTATUS[0]}
+              set -e
+              echo "A3 benchmark exit code: ${BENCH_EXIT}"
+            fi
+
+            # ---- Launch one pytest shard per device, in parallel ----
+            A3_SHARD_PIDS=()
+            cleanup_a3_shards() {
+              for p in "${A3_SHARD_PIDS[@]:-}"; do
+                kill "$p" 2>/dev/null || true
+              done
+            }
+            trap cleanup_a3_shards INT TERM
+            for ((i=0; i<NUM_SHARDS; i++)); do
+              dev="${A3_DEVICES[$i]}"
+              shard_list="${GITHUB_WORKSPACE}/.a3_shards/shard-$i.lst"
+              docker exec \
+                -e ASCEND_RT_VISIBLE_DEVICES="$dev" \
+                -e TILELANG_CACHE_DIR="/root/.tilelang/cache/shard-$i" \
+                -e SHARD_INDEX="$i" \
+                -e SHARD_LIST_FILE="$shard_list" \
+                -e PYTEST_MARKERS="$PYTEST_MARKERS" \
+                -w "$GITHUB_WORKSPACE" \
+                -e BASH_ENV=/root/.bashrc \
+                tilelang_x1 \
+                bash -c '
+                  set -e
+                  source set_env.sh
+                  cd examples
+                  PYTEST_MARKER_ARGS=()
+                  if [ -n "$PYTEST_MARKERS" ]; then PYTEST_MARKER_ARGS+=(-m "$PYTEST_MARKERS"); fi
+                  if [ -s "$SHARD_LIST_FILE" ]; then
+                    SHARD_TARGETS=()
+                    while IFS= read -r t; do [ -n "$t" ] && SHARD_TARGETS+=("$t"); done < "$SHARD_LIST_FILE"
+                    pytest --forked "${SHARD_TARGETS[@]}" -v "${PYTEST_MARKER_ARGS[@]}"
+                  else
+                    echo "No test files assigned to shard $SHARD_INDEX"
+                  fi
+                ' \
+                > "${GITHUB_WORKSPACE}/examples/shard-$i.log" 2>&1 &
+              A3_SHARD_PIDS+=("$!")
+            done
+
+            # ---- Reap all shards; any failure fails the whole test section ----
+            FINAL_EXIT=0
+            for ((i=0; i<${#A3_SHARD_PIDS[@]}; i++)); do
+              if wait "${A3_SHARD_PIDS[$i]}"; then
+                echo "A3 shard-$i PASSED"
+              else
+                echo "A3 shard-$i FAILED"
+                FINAL_EXIT=1
+              fi
+            done
+            trap - INT TERM
+
+            # pytest-only has no benchmark log; synthesize an aggregate summary.
+            if [ "${SHARD_MODE}" = "pytest_only" ]; then
+              P_PASSED=0; P_FAILED=0
+              for ((i=0; i<NUM_SHARDS; i++)); do
+                log="${GITHUB_WORKSPACE}/examples/shard-$i.log"
+                [ -f "$log" ] || continue
+                p=$(grep -Eo '[0-9]+ passed' "$log" | tail -1 | grep -Eo '[0-9]+' || echo 0)
+                f=$(grep -Eo '[0-9]+ failed' "$log" | tail -1 | grep -Eo '[0-9]+' || echo 0)
+                P_PASSED=$((P_PASSED + ${p:-0}))
+                P_FAILED=$((P_FAILED + ${f:-0}))
+              done
+              {
+                echo "pytest sharded results across ${NUM_SHARDS} shards"
+                echo "======================== ${P_PASSED} passed, ${P_FAILED} failed ========================"
+              } > "${GITHUB_WORKSPACE}/examples/test_output.log"
+            fi
+
+            TEST_EXIT_CODE=${BENCH_EXIT:-0}
+            if [ "${FINAL_EXIT}" -ne 0 ]; then
+              TEST_EXIT_CODE=1
+            fi
+            echo "A3 test exit code: ${TEST_EXIT_CODE}"
+            echo "test_exit_code=${TEST_EXIT_CODE}" >> "$GITHUB_OUTPUT"
+            if [ "${TEST_EXIT_CODE}" -ne 0 ]; then
+              exit 1
+            fi
+          else
+            # === A2 / non-A3 path: keep the original single docker exec flow ===
+            NPU_DEVICE_ARGS=()
 
           docker exec \
             "${NPU_DEVICE_ARGS[@]}" \
@@ -750,6 +952,7 @@ jobs:
                 exit 1
               fi
             "
+          fi
       # 全量编译下先删除旧缓存，否则 save 会失败
       - name: Delete old cache for overwrite
         if: always() && env.FULL_BUILD == 'true'
