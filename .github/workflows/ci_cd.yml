@@ -707,11 +707,21 @@ jobs:
                 FIRST_A3_DEVICE=\"\${A3_DEVICES[0]}\"
                 NUM_A3_SHARDS=\${#A3_DEVICES[@]}
 
+                A3_ACTIVE_PIDS=()
+                A3_TMP_DIRS=()
+                cleanup_a3() {
+                  local p d
+                  for p in \"\${A3_ACTIVE_PIDS[@]:-}\"; do kill \"\$p\" 2>/dev/null || true; done
+                  for d in \"\${A3_TMP_DIRS[@]:-}\"; do rm -rf \"\$d\" 2>/dev/null || true; done
+                }
+                trap cleanup_a3 INT TERM
+
                 run_pytest_shards() {
                   local label=\"\$1\"; shift
                   local si t p rc=0 i=0
                   local shard_dir=\"\$(mktemp -d /tmp/a3-shards-XXXXXX)\"
                   local pids=()
+                  A3_TMP_DIRS+=(\"\$shard_dir\")
                   for t in \"\$@\"; do
                     printf '%s\n' \"\$t\" >> \"\$shard_dir/shard-\$((i % NUM_A3_SHARDS)).lst\"
                     i=\$((i+1))
@@ -721,12 +731,13 @@ jobs:
                       export ASCEND_RT_VISIBLE_DEVICES=\"\${A3_DEVICES[si]}\"
                       if [ -s \"\$shard_dir/shard-\${si}.lst\" ]; then
                         mapfile -t SHARD_TARGETS < \"\$shard_dir/shard-\${si}.lst\"
-                        pytest --forked \"\${SHARD_TARGETS[@]}\" -v \"\${PYTEST_MARKER_ARGS[@]}\"
+                        exec pytest --forked \"\${SHARD_TARGETS[@]}\" -v \"\${PYTEST_MARKER_ARGS[@]}\"
                       else
                         echo \"No test files assigned to \${label} shard \${si}\"
                       fi
                     ) > \"\${label}-\${si}.log\" 2>&1 &
                     pids+=(\"\$!\")
+                    A3_ACTIVE_PIDS+=(\"\$!\")
                   done
                   for p in \"\${pids[@]}\"; do wait \"\$p\" || rc=1; done
                   rm -rf \"\$shard_dir\"
@@ -761,6 +772,7 @@ jobs:
                   while IFS= read -r ot; do [ -n \"\$ot\" ] && OPERATOR_TARGETS+=(\"../\$ot\"); done < <(python ../scripts/ci/resolve_operator_tests.py list-tests \$TEST_DIRS_ARG \$EXPERIMENT_DIRS_ARG)
                   run_pytest_shards operator-shard \"\${OPERATOR_TARGETS[@]}\" || TEST_EXIT_CODE=1
                 fi
+                trap - INT TERM
               elif [ \"\$RUN_PYTEST_ONLY\" = true ]; then
                 # 只跑 pytest（testing/ 修改）
                 if [ -n \"\$PYTEST_FILES_ARG\" ]; then
