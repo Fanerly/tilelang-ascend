@@ -474,7 +474,7 @@ jobs:
 
   test:
     name: Benchmark Tests (Ascend NPU)
-    runs-on: [self-hosted, Linux, tilelang-ascend-ci]
+    runs-on: [self-hosted, Linux, fanerly-fork-a3-canary]
     needs: check_changes
     outputs:
       pass_rate: ${{ steps.check_results.outputs.pass_rate }}
@@ -491,6 +491,7 @@ jobs:
     env:
       FULL_BUILD: ${{ github.event_name == 'schedule' || github.event.inputs.full_build == 'true' }}
       A3_CI_DEVICE_LIST_REPO: ${{ vars.A3_CI_DEVICE_LIST }}
+      CI_CONTAINER_NAME_REPO: ${{ vars.CI_CONTAINER_NAME }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -634,7 +635,8 @@ jobs:
           A3_MULTICARD=0
           A3_DEVICE_LIST=""
 
-          if [[ "${RUNNER_NAME:-}" == "ascend_cicd_a3" ]]; then
+          if [[ "${RUNNER_NAME:-}" == "ascend_cicd_a3" ||
+                "${RUNNER_NAME:-}" == "fanerly_a3_pr_canary" ]]; then
             A3_DEVICE_LIST="${A3_CI_DEVICE_LIST:-$A3_CI_DEVICE_LIST_REPO}"
             if [[ ! "${A3_DEVICE_LIST}" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
               echo "::error::A3_CI_DEVICE_LIST must be a comma-separated list of non-negative integers (e.g. '0,1,2,3')."
@@ -649,6 +651,13 @@ jobs:
             A3_MULTICARD=1
             echo "A3 multi-card mode: ${#_A3_DEVS[@]} device(s) -> ${A3_DEVICE_LIST}"
           fi
+
+          CI_CONTAINER_NAME="${CI_CONTAINER_NAME_REPO:-tilelang_x1}"
+          if [[ -z "$CI_CONTAINER_NAME" || ! "$CI_CONTAINER_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+            echo "::error::CI_CONTAINER_NAME has invalid value: '$CI_CONTAINER_NAME'"
+            exit 1
+          fi
+          echo "Using CI container: $CI_CONTAINER_NAME"
 
           docker exec \
             "${NPU_DEVICE_ARGS[@]}" \
@@ -666,7 +675,7 @@ jobs:
             -e PYTEST_MARKERS="$PYTEST_MARKERS" \
             -e A3_MULTICARD="$A3_MULTICARD" \
             -e A3_DEVICE_LIST="$A3_DEVICE_LIST" \
-            tilelang_x1 \
+            "$CI_CONTAINER_NAME" \
             bash -c "
               set -e
 
