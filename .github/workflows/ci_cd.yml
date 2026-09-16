@@ -727,14 +727,41 @@ jobs:
 
                 run_pytest_shards() {
                   local label=\"\$1\"; shift
-                  local si t p rc=0 i=0
+                  local si p rc=0
                   local shard_dir=\"\$(mktemp -d /tmp/a3-shards-XXXXXX)\"
                   local pids=()
                   A3_TMP_DIRS+=(\"\$shard_dir\")
-                  for t in \"\$@\"; do
-                    printf '%s\n' \"\$t\" >> \"\$shard_dir/shard-\$((i % NUM_A3_SHARDS)).lst\"
-                    i=\$((i+1))
-                  done
+                  if [ \"\$#\" -gt 0 ]; then
+                    python3 - \"\$NUM_A3_SHARDS\" \"\$PYTEST_MARKERS\" \"\$shard_dir\" \"\$@\" <<'PY' || { echo \"::error::\${label} sharding failed\"; return 1; }
+          import sys, os, subprocess
+          from collections import Counter
+          num = int(sys.argv[1]); marker = sys.argv[2]; out = sys.argv[3]; files = sys.argv[4:]
+          cmd = [sys.executable, '-m', 'pytest', '--collect-only', '-q', '--disable-warnings'] + (['-m', marker] if marker else []) + files
+          p = subprocess.run(cmd, capture_output=True, text=True)
+          if p.returncode not in (0, 5): print('collect-only failed', file=sys.stderr); sys.exit(1)
+          ids = [l.strip() for l in p.stdout.splitlines() if '::' in l and l.split('::', 1)[0].endswith('.py')]
+          if not ids: print('collection result empty', file=sys.stderr); sys.exit(1)
+          if len(ids) != len(set(ids)): print('duplicate node ids', file=sys.stderr); sys.exit(1)
+          real = {os.path.realpath(f): f for f in files}
+          cnt = Counter(); bad = set()
+          for n in ids:
+              c = n.split('::', 1)[0]
+              ip = real.get(os.path.realpath(os.path.join(os.getcwd(), '..', c)))
+              if ip is None: bad.add(c)
+              else: cnt[ip] += 1
+          if bad: print('unmapped files', file=sys.stderr); sys.exit(1)
+          order = sorted(files, key=lambda f: (-cnt[f], f))
+          loads = [0] * num; buckets = [[] for _ in range(num)]
+          for f in order:
+              s = min(range(num), key=lambda i: loads[i]); buckets[s].append(f); loads[s] += cnt[f]
+          if len(files) >= num and any(not b for b in buckets): print('empty shard', file=sys.stderr); sys.exit(1)
+          os.makedirs(out, exist_ok=True)
+          for i in range(num):
+              open(os.path.join(out, 'shard-' + str(i) + '.lst'), 'w').write(''.join(f + '\n' for f in buckets[i]))
+          print('suite: %d files, %d tests, %d shards' % (len(files), sum(cnt.values()), num))
+          for i in range(num): print('shard %d: files=%d tests=%d' % (i, len(buckets[i]), sum(cnt[f] for f in buckets[i])))
+          PY
+                  fi
                   for ((si=0; si<NUM_A3_SHARDS; si++)); do
                     (
                       export ASCEND_RT_VISIBLE_DEVICES=\"\${A3_DEVICES[si]}\"
@@ -748,7 +775,16 @@ jobs:
                     pids+=(\"\$!\")
                     A3_ACTIVE_PIDS+=(\"\$!\")
                   done
-                  for p in \"\${pids[@]}\"; do wait \"\$p\" || rc=1; done
+                  for ((si=0; si<NUM_A3_SHARDS; si++)); do
+                    if wait \"\${pids[\$si]}\"; then
+                      echo \"== \${label} shard \${si} (device \${A3_DEVICES[\$si]}) PASSED ==\"
+                      tail -n 2 \"\${label}-\${si}.log\" 2>/dev/null || true
+                    else
+                      rc=1
+                      echo \"== \${label} shard \${si} (device \${A3_DEVICES[\$si]}) FAILED ==\"
+                      tail -n 30 \"\${label}-\${si}.log\" 2>/dev/null || true
+                    fi
+                  done
                   rm -rf \"\$shard_dir\"
                   return \$rc
                 }
