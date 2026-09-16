@@ -767,7 +767,7 @@ jobs:
                       export ASCEND_RT_VISIBLE_DEVICES=\"\${A3_DEVICES[si]}\"
                       if [ -s \"\$shard_dir/shard-\${si}.lst\" ]; then
                         mapfile -t SHARD_TARGETS < \"\$shard_dir/shard-\${si}.lst\"
-                        exec pytest --forked \"\${SHARD_TARGETS[@]}\" -v \"\${PYTEST_MARKER_ARGS[@]}\"
+                        exec pytest --forked \"\${SHARD_TARGETS[@]}\" -v -n 8 \"\${PYTEST_MARKER_ARGS[@]}\"
                       else
                         echo \"No test files assigned to \${label} shard \${si}\"
                       fi
@@ -782,7 +782,7 @@ jobs:
                     else
                       rc=1
                       echo \"== \${label} shard \${si} (device \${A3_DEVICES[\$si]}) FAILED ==\"
-                      tail -n 30 \"\${label}-\${si}.log\" 2>/dev/null || true
+                      cat \"\${label}-\${si}.log\" 2>/dev/null || true
                     fi
                   done
                   rm -rf \"\$shard_dir\"
