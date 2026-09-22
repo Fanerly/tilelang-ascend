@@ -1763,9 +1763,7 @@ def transpose(dst: Buffer, src: Buffer):
         raise ValueError(f"transpose requires a 2D source buffer. Got shape: {src_shape}")
 
     if dst.data == src.data:
-        raise ValueError(
-            "transpose does not support in-place operation (dst and src must be different buffers)."
-        )
+        raise ValueError("transpose does not support in-place operation (dst and src must be different buffers).")
 
     elem_bytes = DataType(src.dtype).bits // 8
     for axis_name, dim in [("H", src_shape[-2]), ("W", src_shape[-1])]:
