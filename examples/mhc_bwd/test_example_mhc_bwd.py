@@ -29,6 +29,27 @@ _DEFAULT_CASES = frozenset(
     }
 )
 
+# seqlen is host-padded and does not enter the kernel compile key, so these
+# four cases share the (n_stream=16, tilesize=8) key. Under CI's
+# `--forked -n 8` they would compile and write the same kernel cache entry
+# concurrently, so serialize them onto one xdist worker.
+_XDIST_GROUPS = {
+    (100, 16, 8): "mhc_bwd_ns16",
+    (250, 16, 8): "mhc_bwd_ns16",
+    (256, 16, 8): "mhc_bwd_ns16",
+    (512, 16, 8): "mhc_bwd_ns16",
+}
+
+
+def _marks_for(seqlen: int, n_stream: int, tilesize: int) -> tuple:
+    marks = []
+    if (seqlen, n_stream, tilesize) not in _DEFAULT_CASES:
+        marks.append(pytest.mark.low_priority)
+    group = _XDIST_GROUPS.get((seqlen, n_stream, tilesize))
+    if group is not None:
+        marks.append(pytest.mark.xdist_group(group))
+    return tuple(marks)
+
 
 def _mhc_bwd_cases() -> list:
     shapes = [
@@ -45,7 +66,7 @@ def _mhc_bwd_cases() -> list:
             n_stream,
             tilesize,
             id=f"seqlen{seqlen}_ns{n_stream}_ts{tilesize}",
-            marks=() if (seqlen, n_stream, tilesize) in _DEFAULT_CASES else pytest.mark.low_priority,
+            marks=_marks_for(seqlen, n_stream, tilesize),
         )
         for (seqlen, n_stream, tilesize) in shapes
     ]

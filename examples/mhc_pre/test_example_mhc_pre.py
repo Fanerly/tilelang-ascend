@@ -26,6 +26,37 @@ _DEFAULT_CASES = frozenset(
     }
 )
 
+# Cases that share a kernel compile key (n is T.symbolic and does not enter
+# the key; host-side padding can also fold two h/hc values onto the same
+# padded shape). Under CI's `--forked -n 8` they would compile and write the
+# same kernel cache entry concurrently, so serialize each colliding set onto
+# one xdist worker.
+_XDIST_GROUPS = {
+    (512, 2560, 4): "mhc_pre_h2560_hc4",
+    (1024, 2560, 4): "mhc_pre_h2560_hc4",
+    (2048, 2560, 4): "mhc_pre_h2560_hc4",
+    (4096, 2560, 4): "mhc_pre_h2560_hc4",
+    (4, 128, 4): "mhc_pre_a1_512x32",
+    (4, 100, 4): "mhc_pre_a1_512x32",
+    (4, 128, 8): "mhc_pre_a1_1024x80",
+    (4, 100, 8): "mhc_pre_a1_1024x80",
+    (4, 128, 1): "mhc_pre_a1_512x16",
+    (4, 128, 2): "mhc_pre_a1_512x16",
+    (4, 128, 3): "mhc_pre_a1_512x16",
+    (4, 128, 5): "mhc_pre_a1_1024x48",
+    (4, 128, 6): "mhc_pre_a1_1024x48",
+}
+
+
+def _marks_for(n: int, h: int, hc_mult: int) -> tuple:
+    marks = []
+    if (n, h, hc_mult) not in _DEFAULT_CASES:
+        marks.append(pytest.mark.low_priority)
+    group = _XDIST_GROUPS.get((n, h, hc_mult))
+    if group is not None:
+        marks.append(pytest.mark.xdist_group(group))
+    return tuple(marks)
+
 
 def _mhc_pre_cases() -> list:
     shapes = [
@@ -53,7 +84,7 @@ def _mhc_pre_cases() -> list:
             h,
             hc_mult,
             id=f"n{n}_h{h}_hc{hc_mult}",
-            marks=() if (n, h, hc_mult) in _DEFAULT_CASES else pytest.mark.low_priority,
+            marks=_marks_for(n, h, hc_mult),
         )
         for (n, h, hc_mult) in shapes
     ]
@@ -91,6 +122,7 @@ def test_mhc_pre_accuracy(n: int, h: int, hc_mult: int) -> None:
     torch.testing.assert_close(layer_tl.cpu(), layer_ref.cpu(), rtol=1e-2, atol=1e-2)
 
 
+@pytest.mark.xdist_group("mhc_pre_a1_512x32")
 def test_mhc_pre_distinct_params() -> None:
     import torch
 
