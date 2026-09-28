@@ -318,6 +318,15 @@ def atomic_add(
 
     V1 intentionally models Ascend DMA atomic add only: the destination must be
     GM, and the source must be a local tensor region that can be copied out.
+
+    Args:
+        dst: GM destination tensor (Buffer/BufferRegion/BufferLoad). Scope must be
+            ``global``. Supports float16, float32, int16, int32, bfloat16.
+        src: Local source tensor (Buffer/BufferRegion/BufferLoad). Scope must be
+            local (UB/L0C/L1). dtype must match dst.
+
+    Returns:
+        tvm.tir.Call: A TIR intrinsic call to ``tl.ascend_atomic_add``.
     """
     dst_scope = _atomic_add_scope(dst, "dst")
     src_scope = _atomic_add_scope(src, "src")
@@ -386,18 +395,31 @@ def clear(buffer: Buffer | tir.Var):
     return fill(buffer, 0)
 
 
-def arith_progression(buffer: Buffer, first_value: PrimExpr, diff_value: PrimExpr, count: PrimExpr):
+def arith_progression(buffer: Buffer, first_value: PrimExpr, diff_value: PrimExpr, count: PrimExpr | None = None):
     """Generates an arithmetic progression sequence in a buffer.
+
+    Writes ``count`` elements to ``buffer`` such that
+    ``buffer[i] = first_value + i * diff_value`` (i = 0, 1, ..., count-1).
+    When ``count`` is omitted, it is inferred as ``math.prod(buffer.shape)``.
 
     Args:
         buffer: The destination buffer where the sequence will be stored.
+            Supports float16, float32, int16, int32. float16 is ascendc-only;
+            uint16, uint32 are pto-only.
         first_value: The starting value of the arithmetic progression.
+            Must have the same dtype as ``buffer``.
         diff_value: The difference (step) between consecutive values.
-        count: The number of elements to generate.
+            Must be >= 0 and have the same dtype as ``buffer``.
+        count: The number of elements to generate. Must be > 0 and
+            not exceed ``buffer`` capacity. If None, inferred as
+            ``math.prod(buffer.shape)``.
 
     Returns:
         A TVM intrinsic call that performs the arithmetic progression operation.
     """
+    if count is None:
+        count = math.prod(buffer.shape)
+
     return tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.ascend_arith_progression"),
@@ -416,25 +438,38 @@ def sort(
     *,
     tmp: Buffer | BufferRegion | None = None,
 ):
-    """
-    Performs a full sort on arbitrarily-lengthed input data with automatic internal
-    alignment. Sorts each 32-element block via sort32, then merges all sorted
-    blocks via merge_sort to produce the final ordered output.
+    """Sort data in descending order, outputting interleaved (value, index) pairs.
 
-    The output contains interleaved (value, index) pairs in descending order:
-      [val0, idx0, val1, idx1, ...] where idx is the original position (0-based).
-    Indices are generated internally; dst must be 2x the size of src.
+    Internally sorts each 32-element block via sort32, then merges sorted
+    blocks via merge_sort. A temporary task buffer is auto-injected by the
+    compiler unless an explicit ``tmp`` is provided.
+
+    Output format: ``dst = [val0, idx0, val1, idx1, ...]`` where ``idx`` is the
+    0-based position in the aligned buffer (including -inf padding positions).
 
     Args:
-    dst: Destination buffer for interleaved (value, index) pairs. Must have
-         at least 2 * aligned_size elements.
-    src: Source buffer containing the data to be sorted.
-    actual_num: The number of valid elements in src. When actual_num is less than
-                the buffer size, unused positions are padded with -inf before sorting.
-    tmp: Optional complete UB scratch storage. Its scalar dtype is reinterpreted
-         by lowering and has no semantic meaning.
+        dst: Destination buffer. Must have at least ``2 * aligned_count``
+            elements, where ``aligned_count = ((actual_num + 31) // 32) * 32``.
+        src: Source buffer. Must have at least ``aligned_count`` elements.
+        actual_num: Number of valid elements in ``src``. Must be >= 1
+            (0 triggers a hardware aicore exception).
+        tmp: Optional complete UB scratch storage. Its scalar dtype is
+            reinterpreted by lowering and has no semantic meaning.
+
+    Returns:
+        A TVM intrinsic call that performs the sort operation.
+
+    Note:
+        - float32: ``src`` is modified in-place, padding
+          ``[actual_num, aligned_count)`` with -inf. Copy ``src`` beforehand
+          if the original data is needed later.
+        - float16: ``src`` is not modified (internally cast to float32);
+          result is cast back via CAST_RINT. Index may lose half-precision
+          exactness beyond ~2048 elements.
     """
     repeatTimes = (actual_num + 31) // 32  # ceiling to 32-aligned
+    if isinstance(actual_num, tir.IntImm) and actual_num.value <= 0:
+        raise ValueError(f"sort requires actual_num >= 1, got {actual_num.value}. actual_num=0 triggers a hardware aicore exception.")
     return _call_intrin_with_optional_tmp(
         "sort",
         [
@@ -458,29 +493,43 @@ def merge_sort(
     *,
     tmp: Buffer | BufferRegion | None = None,
 ):
-    """Performs a 2/3/4-way merge sort operation.
+    """Performs a 2/3/4-way merge sort on sorted input blocks.
 
-    This intrinsic invokes the underlying implementation to perform merge sort
-    on multiple sorted blocks using AscendC::MrgSort hardware API.
-    blockLen is calculated from each source buffer size.
-
-    Hardware MrgSort format: 4 floats per element
-    - Position 0: sort key (value)
-    - Position 1: data (index)
-    - Position 2-3: reserved/padding
-    - blockLen = number of elements = buffer_size / 4
+    Merges multiple descending-sorted blocks via the AscendC MrgSort hardware
+    API and writes the combined descending-sorted stream to dst. Each block is
+    a sequence of interleaved (value, index) pairs occupying two buffer
+    positions per element: ``[val0, idx0, val1, idx1, ...]``.
 
     Args:
-        dst: The destination buffer or buffer region where the merged result will be stored.
-        src0: First source buffer or buffer region.
-        src1: Second source buffer or buffer region.
-        src2: Third source buffer or buffer region (optional, for 3-way or 4-way merge).
-        src3: Fourth source buffer or buffer region (optional, for 4-way merge).
+        dst: Destination buffer or region for the merged (value, index)
+            pairs. Must have at least the sum of all source buffer sizes.
+        src0: First source buffer or region, sorted in descending order.
+        src1: Second source buffer or region, sorted in descending order.
+        src2: Third source buffer or region for 3-way or 4-way merge,
+            sorted in descending order (optional).
+        src3: Fourth source buffer or region for 4-way merge, sorted in
+            descending order (optional).
         tmp: Optional complete UB scratch storage. Its scalar dtype is
-            reinterpreted by lowering and has no semantic meaning.
+            reinterpreted by lowering and has no semantic meaning. The
+            ascendc backend omits it; the pto backend allocates it
+            automatically when omitted.
 
     Returns:
         A TVM intrinsic call that performs the merge sort operation.
+
+    Notes:
+        - blockLen (element count) of each source is derived as
+          ``buffer_size // 2``. The ascendc backend accepts
+          blockLen in [1, 4095]; the pto backend requires equal
+          block lengths in [4, 4088].
+        - Only float32 is supported; float16 inputs are not supported.
+        - Equal scores are ordered stably: sources are consumed in
+          src0 → src1 → src2 → src3 order, preserving the order inside
+          each source block.
+        - Slice sources must be 32-byte aligned. Column-offset slices
+          of 2D buffers (e.g. ``buf[0, 8:136]``) are not supported;
+          use 1D slices or whole-row slices (e.g. ``buf[0, :]``)
+          instead.
     """
 
     def retrieve_shape(object: Buffer | BufferRegion) -> list[int]:
@@ -555,20 +604,27 @@ def topk(
     *,
     tmp: Buffer | BufferRegion | None = None,
 ):
-    """Performs a TopK operation by sorting the source data and extracting the top K elements.
+    """Performs a Top-K extraction by sorting the source data in descending order and writing the output to dst.
 
-    Internally calls Sort on the source data, then copies the top K interleaved
-    (value, index) pairs into the destination buffer.
+    The output is `[val0, idx0, val1, idx1, ...]` where idx is the 0-based
+    position in the aligned buffer before sorting. Internally calls Sort on the
+    source data, then copies the top K pairs into dst.
 
     Args:
-        dst: Destination buffer for top K interleaved (value, index) pairs.
-             Must have at least 2*K elements.
+        dst: Destination buffer for the top K interleaved (value, index) pairs.
+             Must have at least aligned_topk elements, where
+             aligned_topk = ((2*K + elems_per_block - 1) / elems_per_block) *
+             elems_per_block and elems_per_block = 32 / sizeof(dtype).
         src: Source buffer containing the data to find top K from.
-             Assumes src has static shape for buffer sizing.
-        K: Number of top elements to extract.
-        actual_num: The number of valid elements in src (can be symbolic for dynamic shapes).
+             Must have a compile-time static shape. For float32, positions from
+             actual_num to aligned_count are padded with -inf in-place; for
+             float16, src is not modified (internally cast to float32).
+        K: Number of top elements to extract, 1 <= K <= actual_num.
+        actual_num: The number of valid elements in src (can be symbolic for
+                    dynamic shapes). Positions beyond actual_num are padded
+                    with -inf before sorting.
         tmp: Optional complete UB scratch storage. Its scalar dtype is
-            reinterpreted by lowering and has no semantic meaning.
+             reinterpreted by lowering and has no semantic meaning.
 
     Returns:
         A TVM intrinsic call that performs the TopK operation.
@@ -589,6 +645,13 @@ def topk(
             )
 
     repeatTimes = (max_actual_num + 31) // 32
+    if isinstance(K, tir.IntImm) and K.value < 1:
+        raise ValueError(f"topk requires K >= 1, got {K.value}.")
+    if isinstance(actual_num, tir.IntImm):
+        if actual_num.value < 1:
+            raise ValueError(f"topk requires actual_num >= 1, got {actual_num.value}. actual_num=0 triggers a hardware aicore exception.")
+        if isinstance(K, tir.IntImm) and K.value > actual_num.value:
+            raise ValueError(f"topk requires K <= actual_num, got K={K.value}, actual_num={actual_num.value}.")
     return _call_intrin_with_optional_tmp(
         "topk",
         [
@@ -1024,67 +1087,119 @@ def binary_op(
 
 
 def add(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, src1: Buffer | BufferRegion | BufferLoad | PrimExpr):
-    """Performs element-wise addition: dst = src0 + src1.
+    """Performs element-wise addition: `dst[i] = src0[i] + src1[i]`.
 
     Args:
-        dst: The destination buffer.
-        src0: The first source buffer.
-        src1: The second source operand (Buffer, BufferLoad, or Scalar).
+        dst: The destination buffer; it may alias src0 or src1 (in-place).
+        src0: The first source, a buffer or a contiguous region of it.
+        src1: The second operand: a buffer, a 1D buffer element (BufferLoad), or a scalar.
+
+    Notes:
+        - dst and src0 must have equal sizes; all tensor operands must share
+          the same dtype, while a scalar src1 is auto-cast to the buffer dtype.
+        - Supported dtypes: float16, float32, int16, int32.
+        - Operand addresses must be 32-byte aligned (hardware constraint).
     """
     return binary_op(dst, src0, src1, "add")
 
 
-def sub(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, src1: Buffer | BufferRegion | BufferLoad):
-    """Performs element-wise subtraction: dst = src0 - src1.
+def sub(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, src1: Buffer | BufferRegion | BufferLoad | PrimExpr):
+    """Performs element-wise subtraction: `dst[i] = src0[i] - src1[i]`.
 
     Args:
-        dst: The destination buffer.
-        src0: The first source buffer.
-        src1: The second source operand (Buffer or BufferLoad).
+        dst: The destination buffer; it may alias src0 or src1 (in-place).
+        src0: The first source, a buffer or a contiguous region of it.
+        src1: The second operand: a buffer, a 1D buffer element (BufferLoad), or a scalar.
+
+    Notes:
+        - dst and src0 must have equal sizes; all tensor operands must share
+          the same dtype, while a scalar src1 is auto-cast to the buffer dtype.
+        - Supported dtypes: float16, float32, int16, int32. A BufferLoad src1
+          with int16/int32 is supported on the pto backend only (ascendc fails
+          to compile).
+        - A scalar src1 is applied via `AscendC::Adds(dst, src0, -src1)`.
+        - A scalar is supported as src1 (right operand) only: subtraction is
+          non-commutative, so `scalar - buffer` (e.g. `2.0 - buf`) cannot be
+          expressed. AscendC `Subs` supports a scalar on either side (flexible
+          scalar); the TileLang frontend does not expose that form yet.
+        - Operand addresses must be 32-byte aligned (hardware constraint).
     """
     return binary_op(dst, src0, src1, "sub")
 
 
 def mul(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, src1: Buffer | BufferRegion | BufferLoad | PrimExpr):
-    """Performs element-wise multiplication: dst = src0 * src1.
+    """Performs element-wise multiplication: `dst[i] = src0[i] * src1[i]`.
 
     Args:
-        dst: The destination buffer.
-        src0: The first source buffer.
-        src1: The second source operand (Buffer, BufferLoad, or Scalar).
+        dst: The destination buffer; it may alias src0 or src1 (in-place).
+        src0: The first source, a buffer or a contiguous region of it.
+        src1: The second operand: a buffer, a 1D buffer element (BufferLoad), or a scalar.
+
+    Notes:
+        - dst and src0 must have equal sizes; all tensor operands must share
+          the same dtype, while a scalar src1 is auto-cast to the buffer dtype.
+        - Supported dtypes: float16, float32, int16, int32.
+        - Operand addresses must be 32-byte aligned (hardware constraint).
     """
     return binary_op(dst, src0, src1, "mul")
 
 
-def div(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, src1: Buffer | BufferRegion | BufferLoad):
-    """Performs element-wise division: dst = src0 / src1.
+def div(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, src1: Buffer | BufferRegion | BufferLoad | PrimExpr):
+    """Performs element-wise division: `dst[i] = src0[i] / src1[i]`.
 
     Args:
-        dst: The destination buffer.
-        src0: The first source buffer.
-        src1: The second source operand (Buffer or BufferLoad).
+        dst: The destination buffer; it may alias src0 or src1 (in-place).
+        src0: The first source, a buffer or a contiguous region of it.
+        src1: The second operand: a buffer, a 1D buffer element (BufferLoad), or a scalar.
+
+    Notes:
+        - dst and src0 must have equal sizes; all tensor operands must share
+          the same dtype, while a scalar src1 is auto-cast to the buffer dtype.
+        - Only float16 and float32 are supported (hardware constraint);
+          integer dtypes are not supported: ascendc fails to compile, and the
+          pto backend may compile a scalar/BufferLoad src1 but gives wrong
+          results.
+        - A scalar src1 is applied via `AscendC::Muls(dst, src0, 1.0f / src1)`,
+          so non-power-of-two divisors introduce an extra rounding error.
+        - A scalar is supported as src1 (right operand) only: division is
+          non-commutative, so `scalar / buffer` (e.g. `2.0 / buf`) cannot be
+          expressed. AscendC `Divs` supports a scalar on either side (flexible
+          scalar); the TileLang frontend does not expose that form yet.
+        - Operand addresses must be 32-byte aligned (hardware constraint).
     """
     return binary_op(dst, src0, src1, "div")
 
 
 def max(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, src1: Buffer | BufferRegion | BufferLoad | PrimExpr):
-    """Performs element-wise maximum: dst = max(src0, src1).
+    """Performs element-wise maximum: `dst[i] = max(src0[i], src1[i])`.
 
     Args:
-        dst: The destination buffer.
-        src0: The first source buffer.
-        src1: The second source operand (Buffer, BufferLoad, or Scalar).
+        dst: The destination buffer; it may alias src0 or src1 (in-place).
+        src0: The first source, a buffer or a contiguous region of it.
+        src1: The second operand: a buffer, a 1D buffer element (BufferLoad), or a scalar.
+
+    Notes:
+        - dst and src0 must have equal sizes; all tensor operands must share
+          the same dtype, while a scalar src1 is auto-cast to the buffer dtype.
+        - Supported dtypes: float16, float32, int16, int32.
+        - Operand addresses must be 32-byte aligned (hardware constraint).
     """
     return binary_op(dst, src0, src1, "max")
 
 
 def min(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, src1: Buffer | BufferRegion | BufferLoad | PrimExpr):
-    """Performs element-wise minimum: dst = min(src0, src1).
+    """Performs element-wise minimum: `dst[i] = min(src0[i], src1[i])`.
 
     Args:
-        dst: The destination buffer.
-        src0: The first source buffer.
-        src1: The second source operand (Buffer, BufferLoad, or Scalar).
+        dst: The destination buffer; it may alias src0 or src1 (in-place).
+        src0: The first source, a buffer or a contiguous region of it.
+        src1: The second operand: a buffer, a 1D buffer element (BufferLoad), or a scalar.
+
+    Notes:
+        - dst and src0 must have equal sizes; all tensor operands must share
+          the same dtype, while a scalar src1 is auto-cast to the buffer dtype.
+        - Supported dtypes: float16, float32, int16, int32.
+        - Operand addresses must be 32-byte aligned (hardware constraint).
     """
     return binary_op(dst, src0, src1, "min")
 
@@ -1596,10 +1711,17 @@ def createvecindex(dst: Buffer, firstValue: PrimExpr):
 
     This intrinsic fills the destination buffer with a sequence of increasing
     indices starting from `firstValue` (e.g., firstValue, firstValue+1, ...).
+    The total element count is derived from ``math.prod(dst.shape)``.
 
     Args:
-        dst: The destination buffer to be filled with indices.
-        firstValue: The starting value of the index sequence.
+        dst: The destination buffer to be filled with indices. Supports
+            float32, int16, int32 on both ascendc and pto backends;
+            float16 on ascendc only; uint16, uint32 on pto only.
+        firstValue: The starting value of the index sequence. Data type
+            should match dst's element type.
+
+    Returns:
+        tvm.tir.Call: A TIR intrinsic call to `tl.ascend_createvecindex`.
     """
     calCount = math.prod(dst.shape)
 
@@ -1611,6 +1733,12 @@ def createvecindex(dst: Buffer, firstValue: PrimExpr):
         firstValue,
         calCount,
     )
+
+
+# snake_case alias for createvecindex
+def create_vec_index(dst: Buffer, first_value: PrimExpr):
+    """snake_case alias for :func:`createvecindex`."""
+    return createvecindex(dst, first_value)
 
 
 def transpose(dst: Buffer, src: Buffer):
@@ -1633,6 +1761,9 @@ def transpose(dst: Buffer, src: Buffer):
     src_shape = list(src.shape)
     if len(src_shape) < 2:
         raise ValueError(f"transpose requires a 2D source buffer. Got shape: {src_shape}")
+
+    if dst.data == src.data:
+        raise ValueError("transpose does not support in-place operation (dst and src must be different buffers).")
 
     elem_bytes = DataType(src.dtype).bits // 8
     for axis_name, dim in [("H", src_shape[-2]), ("W", src_shape[-1])]:
@@ -1670,14 +1801,25 @@ def gather(
 
     This intrinsic gathers elements from the source buffer based on the provided
     offsets and a base address, storing the result in the destination buffer.
+    Both ``src_base_addr`` and the values in ``src_offset`` are byte offsets;
+    the effective element index is ``(src_base_addr + src_offset[i]) /
+    elem_size``. The element count is derived from ``min(dst_size,
+    offset_size)``.
 
     Args:
         dst: The destination buffer where the gathered data will be stored.
-        src: The source buffer containing the data table.
+            Supports float16, float32, bfloat16, int16, uint16, int32, uint32
+            on both ascendc and pto backends.
+        src: The source buffer containing the data table. Must have the same
+            dtype as dst.
         src_offset: The buffer containing offsets/indices for gathering.
+            Must be uint32.
         src_base_addr: The base address offset to be added to the gather indices.
         tmp: Optional complete UB scratch storage. Its scalar dtype is
             reinterpreted by lowering and has no semantic meaning.
+
+    Returns:
+        tvm.tir.Call: A TIR intrinsic call to `tl.ascend_gather`.
     """
     if isinstance(dst, BufferRegion):
         dst_ptr, dst_extent = _handle_buffer_region(dst, "w")
@@ -1843,15 +1985,22 @@ def compare(
     """Generic dispatch function for element-wise comparison operations.
 
     This function compares elements between `src0` and `src1` according to the
-    specified `mode` and stores the result in `dst`. It supports both
+    specified `mode` and stores the result in `dst` as bit-packed int8/uint8
+    (``dst.bit[i] = (src0[i] <mode> src1[i]) ? 1 : 0``). It supports both
     tensor-tensor and tensor-scalar comparisons.
 
+    Supports float16, float32, and int32 for ``src0``/``src1``. ``dst`` must be
+    int8 or uint8. When ``src1`` is a scalar (float or PrimExpr), it is cast to
+    ``src0``'s dtype internally. int32 only supports ``mode="EQ"``. The total
+    bytes of ``src0`` (element_count × dtype_bytes) must be 256-byte aligned.
+
     Args:
-        dst: The destination buffer where the comparison results will be stored.
-        src0: The first source buffer.
+        dst: The destination buffer (int8/uint8, bit-packed) where the comparison
+            results will be stored.
+        src0: The first source buffer. Supports float16, float32, int32.
         src1: The second source operand. It can be a Buffer (for element-wise
             tensor comparison) or a BufferLoad/PrimExpr/float (for tensor-scalar
-            comparison).
+            comparison). When scalar, dtype is cast to match src0.
         mode: The comparison mode string. Supported values:
             - "EQ": Equal to (==)
             - "NE": Not equal to (!=)
@@ -2311,11 +2460,13 @@ def broadcast(
     This function performs a broadcast copy from the source buffer (`src`) to the
     destination buffer (`dst`). It automatically infers the broadcasting axis
     based on the shapes of the input buffers, or uses the explicitly provided axis.
+    Supports int8, uint8, int16, uint16, float16, bfloat16, float32, int32,
+    uint32. Both ``dst`` and ``src`` must be in UB and have the same dtype.
 
     Args:
-        dst: Destination buffer (must be in UB).
-        src: Source buffer (must be in UB).
-        axis: Broadcasting axis (0 or 1). If None, auto-inferred.
+        dst: Destination buffer (must be in UB). Same dtype as ``src``.
+        src: Source buffer (must be in UB). Same dtype as ``dst``.
+        axis: Broadcasting axis (0 or 1). If None, auto-inferred from shapes.
         tmp: Optional complete target-specific scratch storage. It must be a
             one-dimensional, static, contiguous fixed-width scalar buffer in
             ``shared.ub``, or an equivalent 32-byte-aligned buffer region. Its

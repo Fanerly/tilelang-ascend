@@ -1507,8 +1507,8 @@ Expert编程模式可以复用Developer模式的Reduce类计算原语。
 | ---------- | ---------------------------------------- | ------------------------------------------------------------ |
 | 加法       | T.tile.add(dst, src0, src1)              | element-wise加法，dst = src0 + src1                          |
 | 减法       | T.tile.sub(dst, src0, src1)              | element-wise减法，dst = src0 - src1                          |
-| 乘法       | T.tile.mul(dst, src0, src1)              | element-wise法乘，dst = src0 * src1                          |
-| 除法       | T.tile.div(dst, src0, src1)              | element-wise法乘，dst = src0 / src1                          |
+| 乘法       | T.tile.mul(dst, src0, src1)              | element-wise乘法，dst = src0 * src1                          |
+| 除法       | T.tile.div(dst, src0, src1)              | element-wise除法，dst = src0 / src1（仅支持浮点 dtype）      |
 | 最大值     | T.tile.max(dst, src0, src1)              | element-wise 求max，dst = max(src0, src1)                    |
 | 最小值     | T.tile.min(dst, src0, src1)              | element-wise 求min，dst = min(src0, src1)                    |
 | 指数       | T.tile.exp(dst, src0)                    | element-wise 取自然指数，dst = exp(src0)                     |
@@ -1536,11 +1536,13 @@ Expert编程模式可以复用Developer模式的Reduce类计算原语。
 
   **参数**：
 
-  - dst：计算结果存放目的buffer
+  - dst：计算结果存放目的buffer，可与 src0/src1 别名（原地运算）
   - src0: 操作数1，数据类型为buffer类型
   - src1: 操作数2，数据类型可以为buffer类型，也可以是scalar类型
 
   **功能**：element-wise加法，dst = src0 + src1
+
+  **支持类型**：float16、float32、int16、int32（dst/src0/src1 必须一致）
 
   **举例**：
 
@@ -1556,11 +1558,13 @@ Expert编程模式可以复用Developer模式的Reduce类计算原语。
 
   **参数**：
 
-  - dst：计算结果存放目的buffer
-  - src0: 操作数1，数据类型为buffer类型
-  - src1: 操作数2，数据类型可以为buffer类型，也可以是scalar类型
+  - dst：计算结果存放目的buffer，可与 src0/src1 别名（原地运算）
+  - src0: 操作数1（被减数），数据类型为buffer类型
+  - src1: 操作数2（减数），数据类型可以为buffer类型，也可以是scalar类型
 
   **功能**：element-wise减法，dst = src0 - src1
+
+  **支持类型**：float16、float32、int16、int32（dst/src0/src1 必须一致）
 
   **举例**：
 
@@ -1576,11 +1580,13 @@ Expert编程模式可以复用Developer模式的Reduce类计算原语。
 
   **参数**：
 
-  - dst：计算结果存放目的buffer
+  - dst：计算结果存放目的buffer，可与 src0/src1 别名（原地运算）
   - src0: 操作数1，数据类型为buffer类型
   - src1: 操作数2，数据类型可以为buffer类型，也可以是scalar类型
 
-  **功能**：element-wise法乘，dst = src0 * src1
+  **功能**：element-wise乘法，dst = src0 * src1
+
+  **支持类型**：float16、float32、int16、int32（dst/src0/src1 必须一致）
 
   **举例**：
 
@@ -1596,11 +1602,13 @@ Expert编程模式可以复用Developer模式的Reduce类计算原语。
 
   **参数**：
 
-  - dst：计算结果存放目的buffer
-  - src0: 操作数1，数据类型为buffer类型
-  - src1: 操作数2，数据类型可以为buffer类型，也可以是scalar类型
+  - dst：计算结果存放目的buffer，可与 src0/src1 别名（原地运算）
+  - src0: 操作数1（被除数），数据类型为buffer类型
+  - src1: 操作数2（除数），数据类型可以为buffer类型，也可以是scalar类型
 
-  **功能**：element-wise法乘，dst = src0 / src1
+  **功能**：element-wise除法，dst = src0 / src1
+
+  **支持类型**：仅 float16、float32（整数 dtype 不支持）；scalar 除法通过乘以倒数实现，非 2 的幂次除数有额外舍入误差
 
   **举例**：
 
@@ -2125,28 +2133,22 @@ Expert编程模式可以复用Developer模式的Reduce类计算原语。
   - `dst`与 `src` 数据类型相同，仅支持float32和float16数据类型
   - `src` 的大小需要满足32或32的整数倍
 
-- `T.tile.merge_sort(dst, src0, src1, src2=None, src3=None):`
+- `T.tile.merge_sort(dst, src0, src1, src2=None, src3=None, tmp=None):`
 
   **参数**：
 
   - dst：归并结果输出缓冲区
-  - tmp：临时缓冲区，用于归并计算的中间结果存储
   - src0：第一个已排序的源数据缓冲区
   - src1：第二个已排序的源数据缓冲区
   - src2：第三个已排序的源数据缓冲区（可选，3-way 或 4-way 归并时需要）
   - src3：第四个已排序的源数据缓冲区（可选，4-way 归并时需要）
+  - tmp：可选临时缓冲区（ascendc 后端不使用；pto 后端不传时自动分配，显式传入须为非空 buffer）
 
   **功能**：将多个已排序的数据块合并为一个有序结果，支持 2-way、3-way 和 4-way 归并排序。
 
-  **数据格式**：输入/输出格式均为 value-index pair：`[value0, index0, value1, index1, value2, index2, ...]`，按降序排列。
-
-  数据类型为float，每个结构占据8Bytes：
+  **数据格式**：输入/输出格式均为 value-index pair：`[value0, index0, value1, index1, value2, index2, ...]`，按降序排列。数据类型为 float32，每个结构（value + index）占据 8 Bytes：
 
   ![image-tilelang_ascend_mergesort2](./images/zh-cn_image_0000002449970177.png)
-
-  数据类型为half，每个结构也占据8Bytes，中间有2Bytes保留：
-  
-  ![image-tilelang_ascend_mergesort2](./images/zh-cn_image_0000002449890293.png)
 
   **举例**：
 
@@ -2162,12 +2164,12 @@ Expert编程模式可以复用Developer模式的Reduce类计算原语。
   ```
 
   **注意事项**：
-  - `tmp` 缓冲区大小需与 `dst` 相同
+  - 目前仅支持 `float32`，不支持 `float16`
   - 输入缓冲区必须已按降序排序
   - 所有缓冲区的数据格式必须为 value-index pair（每 2 个 float 表示一个元素）
+  - dst 大小至少为所有 src 大小之和
+  - pto 后端要求各 src 大小相同（不等长归并仅 ascendc 支持）
   - 建议配合 `T.tile.sort32` 一起使用
-
-  更详细说明，详见AscendC文档：https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1alpha002/API/ascendcopapi/atlasascendc_api_07_0232.html
 
 - `T.tile.topk(dst, src, K, actual_num):`
 
