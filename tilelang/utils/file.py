@@ -22,8 +22,7 @@ def atomic_copy(src: str | os.PathLike, dst: str | os.PathLike) -> None:
     publication with concurrent cache deletion.
     """
     dst = os.fspath(dst)
-    fd, temporary_path = tempfile.mkstemp(
-        prefix=f".{os.path.basename(dst)}.", suffix=".tmp", dir=os.path.dirname(dst) or ".")
+    fd, temporary_path = tempfile.mkstemp(prefix=f".{os.path.basename(dst)}.", suffix=".tmp", dir=os.path.dirname(dst) or ".")
     try:
         os.close(fd)
         shutil.copy(src, temporary_path)

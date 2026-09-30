@@ -21,7 +21,6 @@ SPEC.loader.exec_module(HELPER)
 
 
 class TestAtomicCopy(unittest.TestCase):
-
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -78,9 +77,7 @@ class TestAtomicCopy(unittest.TestCase):
 
     def test_replace_failure_keeps_old_file_and_cleans_temporary(self):
         original = self.dst.read_bytes()
-        with patch.object(
-                HELPER.os, "replace",
-                side_effect=OSError("replace failure")), self.assertRaises(OSError):
+        with patch.object(HELPER.os, "replace", side_effect=OSError("replace failure")), self.assertRaises(OSError):
             HELPER.atomic_copy(self.src, self.dst)
         self.assertEqual(self.dst.read_bytes(), original)
         self.assert_no_temporary_files()
@@ -118,15 +115,11 @@ for _ in range(40):
             for i in range(4):
                 processes.append(
                     subprocess.Popen(
-                        [
-                            sys.executable, "-c", script,
-                            str(HELPER_PATH),
-                            str(sources[i % 2]),
-                            str(self.dst)
-                        ],
+                        [sys.executable, "-c", script, str(HELPER_PATH), str(sources[i % 2]), str(self.dst)],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
-                    ))
+                    )
+                )
             for process in processes:
                 _, stderr = process.communicate(timeout=30)
                 self.assertEqual(process.returncode, 0, stderr.decode())
@@ -137,16 +130,13 @@ for _ in range(40):
                 process.communicate()
         self.assert_no_temporary_files()
 
-    @unittest.skipUnless(
-        sys.platform.startswith("linux") and shutil.which("cc"),
-        "Requires Linux and a host C compiler")
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("cc"), "Requires Linux and a host C compiler")
     def test_loaded_shared_library_survives_republication(self):
         # Run the dlopen scenario in a subprocess: the old in-place publication
         # can crash the dynamic loader. Never overwrite a real kernel cache.
         for filename, value in ((self.dst, 17), (self.src, 29)):
             subprocess.run(
-                ["cc", "-shared", "-fPIC", "-x", "c", "-o",
-                 str(filename), "-"],
+                ["cc", "-shared", "-fPIC", "-x", "c", "-o", str(filename), "-"],
                 input=f"int cached_value(void) {{ return {value}; }}".encode(),
                 check=True,
                 capture_output=True,
@@ -167,20 +157,13 @@ helper.atomic_copy(sys.argv[2], sys.argv[3])
 assert loaded['cached_value']() == 17
 """
         result = subprocess.run(
-            [sys.executable, "-c", script,
-             str(HELPER_PATH),
-             str(self.src),
-             str(self.dst)],
+            [sys.executable, "-c", script, str(HELPER_PATH), str(self.src), str(self.dst)],
             capture_output=True,
             timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         result = subprocess.run(
-            [
-                sys.executable, "-c",
-                "import ctypes, sys; assert ctypes.CDLL(sys.argv[1]).cached_value() == 29",
-                str(self.dst)
-            ],
+            [sys.executable, "-c", "import ctypes, sys; assert ctypes.CDLL(sys.argv[1]).cached_value() == 29", str(self.dst)],
             capture_output=True,
             timeout=30,
         )
