@@ -12,7 +12,7 @@ from pathlib import Path
 
 from tilelang.jit import JITKernel
 from tilelang.utils.target import determine_platform
-from tilelang.utils.file import atomic_copy
+from tilelang.utils.file import atomic_copy, is_file_missing
 import cloudpickle
 import os
 from tilelang.engine.param import KernelParam
@@ -293,24 +293,33 @@ class AutotuneResult:
                 logger.error(f"Error loading auto_gm_idx from disk: {e}")
 
         if kernel_global_source and kernel_params:
-            return JITKernel.from_database(
-                func=func,
-                kernel_global_source=kernel_global_source,
-                kernel_lib_path=kernel_lib_path,
-                params=kernel_params,
-                target=target,
-                target_host=target_host,
-                # Resolve "auto" to the concrete platform (respects TL_PLATFORM,
-                # so sim-mode restores load the right simulator lib). workspace_idx
-                # is not tracked by the auto-tuner (it compiles with the default).
-                platform=determine_platform(platform),
-                out_idx=out_idx,
-                workspace_idx=None,
-                auto_gm_idx=auto_gm_idx,
-                execution_backend=execution_backend,
-                pass_configs=pass_configs,
-                compile_flags=compile_flags,
-            )
+            try:
+                return JITKernel.from_database(
+                    func=func,
+                    kernel_global_source=kernel_global_source,
+                    kernel_lib_path=kernel_lib_path,
+                    params=kernel_params,
+                    target=target,
+                    target_host=target_host,
+                    # Resolve "auto" to the concrete platform (respects TL_PLATFORM,
+                    # so sim-mode restores load the right simulator lib). workspace_idx
+                    # is not tracked by the auto-tuner (it compiles with the default).
+                    platform=determine_platform(platform),
+                    out_idx=out_idx,
+                    workspace_idx=None,
+                    auto_gm_idx=auto_gm_idx,
+                    execution_backend=execution_backend,
+                    pass_configs=pass_configs,
+                    compile_flags=compile_flags,
+                )
+            except OSError:
+                if is_file_missing(kernel_lib_path):
+                    logger.warning(
+                        "Cached kernel library %s disappeared while loading; recompiling.",
+                        kernel_lib_path,
+                    )
+                    return None
+                raise
         else:
             return None
 

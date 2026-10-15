@@ -21,7 +21,7 @@ import logging
 from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
 from tilelang.version import __version__
 from tilelang.utils.target import determine_platform
-from tilelang.utils.file import atomic_copy
+from tilelang.utils.file import atomic_copy, is_file_missing
 
 KERNEL_PATH = "kernel.cu"
 WRAPPED_KERNEL_PATH = "wrapped_kernel.cu"
@@ -392,21 +392,30 @@ class KernelCache:
             auto_gm_idx = []
 
         if kernel_global_source and kernel_params:
-            return JITKernel.from_database(
-                func=func,
-                kernel_global_source=kernel_global_source,
-                kernel_lib_path=kernel_lib_path,
-                params=kernel_params,
-                target=target,
-                target_host=target_host,
-                platform=platform,
-                out_idx=out_idx,
-                workspace_idx=workspace_idx,
-                auto_gm_idx=auto_gm_idx,
-                execution_backend=execution_backend,
-                pass_configs=pass_configs,
-                compile_flags=compile_flags,
-            )
+            try:
+                return JITKernel.from_database(
+                    func=func,
+                    kernel_global_source=kernel_global_source,
+                    kernel_lib_path=kernel_lib_path,
+                    params=kernel_params,
+                    target=target,
+                    target_host=target_host,
+                    platform=platform,
+                    out_idx=out_idx,
+                    workspace_idx=workspace_idx,
+                    auto_gm_idx=auto_gm_idx,
+                    execution_backend=execution_backend,
+                    pass_configs=pass_configs,
+                    compile_flags=compile_flags,
+                )
+            except OSError:
+                if is_file_missing(kernel_lib_path):
+                    self.logger.warning(
+                        "Cached kernel library %s disappeared while loading; recompiling.",
+                        kernel_lib_path,
+                    )
+                    return None
+                raise
         else:
             return None
 
