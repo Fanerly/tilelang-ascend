@@ -37,15 +37,22 @@ def is_file_missing(path: str | os.PathLike) -> bool:
 def error_reports_missing_path(error: OSError, path: str | os.PathLike) -> bool:
     """Return whether ``error`` names ``path`` itself as the missing object.
 
-    ``ctypes.CDLL(path)`` raises :class:`OSError` whose message is
-    ``"<name>: cannot open shared object file: ..."`` where ``<name>`` is the
-    object the dynamic loader failed to load. For a missing target this is
-    ``path`` itself; for a missing dependency it is the dependency's name.
-    ``OSError.errno`` is ``None`` for both, so the message is the only way to
-    tell them apart. Only the target's basename is matched, so this stays a
-    narrow classification rather than a general error-text parser.
+    ``ctypes.CDLL(path)`` raises :class:`OSError` (``errno`` is ``None``) whose
+    message is ``"<name>: cannot open shared object file: <reason>"`` where
+    ``<name>`` is the object the dynamic loader failed to load. Only the exact
+    ``"cannot open shared object file: No such file or directory"`` reason means
+    an object is missing; other reasons (``"file too short"``, ``"wrong ELF
+    class"``, permission failures) are not missing-library errors. The named
+    object must also resolve to ``path`` itself, so a same-basename library in
+    another directory or a dependency whose name merely contains the target's
+    basename is never mistaken for the target.
     """
-    return os.path.basename(os.fspath(path)) in str(error)
+    message = str(error)
+    suffix = ": cannot open shared object file: No such file or directory"
+    if not message.endswith(suffix):
+        return False
+    named = message[: -len(suffix)]
+    return os.path.abspath(named) == os.path.abspath(os.fspath(path))
 
 
 def atomic_copy(src: str | os.PathLike, dst: str | os.PathLike) -> None:

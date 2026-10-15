@@ -9,6 +9,7 @@ falls back to a cache miss instead of raising. They are deterministic: a mocked
 exact point the real ``ctypes.CDLL`` would fail.
 """
 
+import ctypes
 import importlib.util
 import pickle
 import sys
@@ -146,6 +147,43 @@ class TestIsFileMissing(unittest.TestCase):
         self.assertFalse(self.helper.is_file_missing(path))
 
 
+class TestErrorReportsMissingPath(unittest.TestCase):
+    """The loader-error classifier distinguishes target-missing from bad/foreign files."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.helper = _load_standalone(FILE_HELPER_PATH, "tilelang_error_reports_missing_path")
+
+    def _dl_error(self, path):
+        try:
+            ctypes.CDLL(str(path))
+        except OSError as error:
+            return error
+        self.fail(f"loading {path} unexpectedly succeeded")
+
+    def test_real_missing_target_is_reported(self):
+        missing = self.root / "kernel_lib.so"
+        self.assertTrue(self.helper.error_reports_missing_path(self._dl_error(missing), missing))
+
+    def test_real_truncated_library_is_not_reported(self):
+        bad = self.root / "kernel_lib.so"
+        bad.write_bytes(b"")  # dlopen reports "file too short"
+        self.assertFalse(self.helper.error_reports_missing_path(self._dl_error(bad), bad))
+
+    def test_dependency_name_containing_target_is_not_reported(self):
+        target = self.root / "kernel_lib.so"
+        error = OSError("libkernel_lib.so: cannot open shared object file: No such file or directory")
+        self.assertFalse(self.helper.error_reports_missing_path(error, target))
+
+    def test_same_basename_in_other_directory_is_not_reported(self):
+        target = self.root / "kernel_lib.so"
+        other = self.root / "other" / "kernel_lib.so"
+        error = OSError(f"{other}: cannot open shared object file: No such file or directory")
+        self.assertFalse(self.helper.error_reports_missing_path(error, target))
+
+
 class KernelCacheRecoveryMixin:
     """Shared fixtures and assertions for the three cache-load entry points."""
 
@@ -268,7 +306,8 @@ class TestKernelCacheRecovery(KernelCacheRecoveryMixin, unittest.TestCase):
 
         def fail_dependency_and_delete(**kwargs):
             Path(kwargs["kernel_lib_path"]).unlink()
-            error = OSError("libfoo.so: cannot open shared object file: No such file or directory")
+            # The dependency's name contains the target basename as a substring.
+            error = OSError("libkernel_lib.so: cannot open shared object file: No such file or directory")
             error.errno = None
             raise error
 
@@ -301,6 +340,51 @@ class TestKernelCacheRecovery(KernelCacheRecoveryMixin, unittest.TestCase):
         ):
             result = self.cache.cached(func=func)
         self.assertIs(result, fake_kernel)
+
+    def test_truncated_library_with_deletion_is_not_a_miss(self):
+        key = "k_trunc"
+        self.write_entry(self.cache, key, with_lib=True)
+
+        def fail_truncated_and_delete(**kwargs):
+            lib_path = kwargs["kernel_lib_path"]
+            Path(lib_path).unlink()
+            raise OSError(f"{lib_path}: file too short")
+
+        with mock.patch.object(self.jit_kernel, "from_database", side_effect=fail_truncated_and_delete), self.assertRaises(OSError):
+            self.cache._load_kernel_from_disk(key)
+
+    def test_recreated_library_after_deletion_reraises(self):
+        key = "k_recreated"
+        self.write_entry(self.cache, key, with_lib=True)
+
+        def delete_recreate_and_fail(**kwargs):
+            lib_path = Path(kwargs["kernel_lib_path"])
+            lib_path.unlink()
+            lib_path.write_bytes(b"recreated")  # reappears before the filesystem check
+            raise OSError(f"{lib_path}: cannot open shared object file: No such file or directory")
+
+        with mock.patch.object(self.jit_kernel, "from_database", side_effect=delete_recreate_and_fail), self.assertRaises(OSError):
+            self.cache._load_kernel_from_disk(key)
+
+    def test_makedirs_failure_still_returns_result(self):
+        func = mock.MagicMock()
+        func.script.return_value = "script"
+        with (
+            mock.patch.object(self.cache, "_load_kernel_from_disk", return_value=None),
+            mock.patch("os.makedirs", side_effect=FileNotFoundError("cache directory deleted")),
+        ):
+            result = self.cache.cached(func=func)
+        self.assertIs(result, self.jit_kernel.return_value)
+
+    def test_makedirs_permission_error_propagates(self):
+        func = mock.MagicMock()
+        func.script.return_value = "script"
+        with (
+            mock.patch.object(self.cache, "_load_kernel_from_disk", return_value=None),
+            mock.patch("os.makedirs", side_effect=PermissionError("permission denied")),
+            self.assertRaises(PermissionError),
+        ):
+            self.cache.cached(func=func)
 
 
 class TestTunerCacheRecovery(KernelCacheRecoveryMixin, unittest.TestCase):
@@ -409,6 +493,51 @@ class TestAutotuneResultRecovery(KernelCacheRecoveryMixin, unittest.TestCase):
             raise FileNotFoundError(f"{path}: No such file or directory")
 
         with mock.patch("builtins.open", side_effect=fail_open):
+            result.save_to_disk(entry)
+
+    def test_save_to_disk_serialization_error_propagates(self):
+        entry = Path(self.tmp.name) / "ser_err"
+        entry.mkdir(parents=True, exist_ok=True)
+
+        class ReadsMissingFile:
+            def __reduce__(self):
+                open("/definitely/does/not/exist_xyz.pkl", "rb")
+                return (self.__class__, ())
+
+        result = self.result_cls(
+            config={"x": 1},
+            func=ReadsMissingFile(),
+            kernel=mock.MagicMock(),
+            latency=0.1,
+            ref_latency=0.2,
+        )
+        # Serialization-internal FileNotFoundError must propagate, not be swallowed
+        # by the cache-open recovery.
+        with self.assertRaises(FileNotFoundError):
+            result.save_to_disk(entry)
+
+    def test_save_to_disk_makedirs_deletion_skips_save(self):
+        entry = Path(self.tmp.name) / "mk_del"
+        result = self.result_cls(
+            config={"x": 1},
+            func="fn",
+            kernel=mock.MagicMock(),
+            latency=0.1,
+            ref_latency=0.2,
+        )
+        with mock.patch("os.makedirs", side_effect=FileNotFoundError("cache directory deleted")):
+            result.save_to_disk(entry)
+
+    def test_save_to_disk_makedirs_permission_error_propagates(self):
+        entry = Path(self.tmp.name) / "mk_perm"
+        result = self.result_cls(
+            config={"x": 1},
+            func="fn",
+            kernel=mock.MagicMock(),
+            latency=0.1,
+            ref_latency=0.2,
+        )
+        with mock.patch("os.makedirs", side_effect=PermissionError("permission denied")), self.assertRaises(PermissionError):
             result.save_to_disk(entry)
 
 

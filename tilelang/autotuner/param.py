@@ -171,7 +171,13 @@ class AutotuneResult:
             - kernel_lib.so: The compiled kernel library
             - params.pkl: The serialized kernel parameters
         """
-        os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists
+        try:
+            os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists
+        except FileNotFoundError:
+            # The cache directory disappeared while publishing; the compiled
+            # kernel is still usable, so abandon the save without failing.
+            logger.warning("Cache directory disappeared while saving kernel; skipping save: %s", cache_path)
+            return
 
         # Save kernel source code
         try:
@@ -332,44 +338,50 @@ class AutotuneResult:
             return None
 
     def save_to_disk(self, path: Path, verbose: bool = False):
-        if not os.path.exists(path):
-            os.makedirs(path)
+        try:
+            os.makedirs(path, exist_ok=True)
+        except FileNotFoundError:
+            logger.warning("Cache directory disappeared while saving tuning result; skipping save: %s", path)
+            return
 
         # save best config
         if verbose:
             logger.debug(f"Saving best config to file: {path / BEST_CONFIG_PATH}")
         try:
-            with open(path / BEST_CONFIG_PATH, "w") as f:
-                json.dump(self.config, f)
+            best_config_file = open(path / BEST_CONFIG_PATH, "w")
         except FileNotFoundError:
             logger.warning("Cache disappeared while saving tuning result; skipping save: %s", path)
             return
+        with best_config_file:
+            json.dump(self.config, best_config_file)
 
         # save function
         if verbose:
             logger.debug(f"Saving function to file: {path / FUNCTION_PATH}")
         try:
-            with open(path / FUNCTION_PATH, "wb") as f:
-                cloudpickle.dump(self.func, f)
+            function_file = open(path / FUNCTION_PATH, "wb")
         except FileNotFoundError:
             logger.warning("Cache disappeared while saving tuning result; skipping save: %s", path)
             return
+        with function_file:
+            cloudpickle.dump(self.func, function_file)
 
         # save ref latency
         if verbose:
             logger.debug(f"Saving latency to file: {path / LATENCY_PATH}")
         try:
-            with open(path / LATENCY_PATH, "w") as f:
-                json.dump(
-                    {
-                        "latency": self.latency,
-                        "ref_latency": self.ref_latency,
-                    },
-                    f,
-                )
+            latency_file = open(path / LATENCY_PATH, "w")
         except FileNotFoundError:
             logger.warning("Cache disappeared while saving tuning result; skipping save: %s", path)
             return
+        with latency_file:
+            json.dump(
+                {
+                    "latency": self.latency,
+                    "ref_latency": self.ref_latency,
+                },
+                latency_file,
+            )
 
         # save kernel
         self._save_kernel_to_disk(path, self.kernel)

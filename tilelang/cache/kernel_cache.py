@@ -279,7 +279,13 @@ class KernelCache:
             - params.pkl: The serialized kernel parameters
         """
         cache_path = self._get_cache_path(key)
-        os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists
+        try:
+            os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists
+        except FileNotFoundError:
+            # The cache directory disappeared while publishing; the compiled
+            # kernel is still usable, so abandon the save without failing.
+            self.logger.warning("Cache directory disappeared while saving kernel; skipping save: %s", cache_path)
+            return
 
         # Save kernel source code
         try:
