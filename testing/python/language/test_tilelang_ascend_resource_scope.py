@@ -78,7 +78,7 @@ def test_default_combine_lowers_vector_kernel_with_optional_scope(explicit_scope
     with tilelang.transform.PassContext(config={"tl.ascend_auto_cv_combine": True}):
         explicit_source = tilelang.lower(main, target=target, platform="A3").kernel_source
     assert default_source == explicit_source
-    add = "AscendC::Add(" if target == "ascendc" else "TADD("
+    add = "AscendC::Add<float, false>" if target == "ascendc" else "TADD("
     assert default_source.count(add) == 1
     with tilelang.transform.PassContext(config={"tl.ascend_auto_cv_combine": False}):
         if explicit_scope:
@@ -361,7 +361,7 @@ def test_pipeline_with_nested_serial_loop_lowers_after_cv_split(dynamic):
     }
     with tilelang.transform.PassContext(config=config):
         source = tilelang.lower(main, target="ascendc", platform="A3").kernel_source
-    assert "AscendC::Add(" in source
+    assert "AscendC::Add<float, false>" in source
     assert "copy_gm_to_ub" in source and "copy_ub_to_gm" in source
     if dynamic:
         assert "< repeats;" in source

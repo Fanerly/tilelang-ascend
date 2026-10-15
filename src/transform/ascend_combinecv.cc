@@ -18,6 +18,7 @@
 
 #include "../op/ascend.h"
 #include "../op/builtin.h"
+#include "./common/ascend_vector_mask.h"
 #include "./common/collector.h"
 #include "./common/operation_config.h"
 
@@ -763,6 +764,7 @@ AscendResource ResourceForEventType(const std::string &event_type,
 }
 
 AscendResource ResourceForCall(const CallNode *call, std::string *operation) {
+  Call call_ref = GetRef<Call>(call);
   const auto *op = call->op.as<OpNode>();
   *operation = op == nullptr ? "Ascend call" : op->name;
 
@@ -798,7 +800,8 @@ AscendResource ResourceForCall(const CallNode *call, std::string *operation) {
     }
     return AscendResource::kExplicit;
   }
-  if (call->op.same_as(ascend_set_deq_scale())) {
+  if (call->op.same_as(ascend_set_deq_scale()) ||
+      IsVectorMaskSetter(call_ref) || IsSelectedVectorTerminal(call_ref)) {
     return AscendResource::kVector;
   }
   if (call->op.same_as(ascend_dump_tensor())) {
