@@ -172,8 +172,9 @@ class KernelCacheRecoveryMixin:
         fake = object()
 
         def delete_then_fail(**kwargs):
-            Path(kwargs["kernel_lib_path"]).unlink()
-            raise OSError("cannot open shared object file")
+            lib_path = kwargs["kernel_lib_path"]
+            Path(lib_path).unlink()
+            raise OSError(f"{lib_path}: cannot open shared object file: No such file or directory")
 
         with mock.patch.object(self.jit_kernel, "from_database", side_effect=delete_then_fail):
             self.assertIsNone(cache._load_kernel_from_disk(key))
@@ -210,8 +211,9 @@ class TestKernelCacheRecovery(KernelCacheRecoveryMixin, unittest.TestCase):
         self.write_entry(self.cache, key, with_lib=True)
 
         def delete_then_fail(**kwargs):
-            Path(kwargs["kernel_lib_path"]).unlink()
-            error = OSError("cannot open shared object file")
+            lib_path = kwargs["kernel_lib_path"]
+            Path(lib_path).unlink()
+            error = OSError(f"{lib_path}: cannot open shared object file: No such file or directory")
             error.errno = None
             raise error
 
@@ -246,6 +248,60 @@ class TestKernelCacheRecovery(KernelCacheRecoveryMixin, unittest.TestCase):
         self.assertIs(second, fake)
         load.assert_called_once()
 
+    def test_permission_error_with_deletion_is_not_a_miss(self):
+        key = "k_perm_del"
+        self.write_entry(self.cache, key, with_lib=True)
+
+        def fail_permission_and_delete(**kwargs):
+            Path(kwargs["kernel_lib_path"]).unlink()
+            raise PermissionError("permission denied")
+
+        with (
+            mock.patch.object(self.jit_kernel, "from_database", side_effect=fail_permission_and_delete),
+            self.assertRaises(PermissionError),
+        ):
+            self.cache._load_kernel_from_disk(key)
+
+    def test_dependency_error_with_deletion_is_not_a_miss(self):
+        key = "k_dep_del"
+        self.write_entry(self.cache, key, with_lib=True)
+
+        def fail_dependency_and_delete(**kwargs):
+            Path(kwargs["kernel_lib_path"]).unlink()
+            error = OSError("libfoo.so: cannot open shared object file: No such file or directory")
+            error.errno = None
+            raise error
+
+        with mock.patch.object(self.jit_kernel, "from_database", side_effect=fail_dependency_and_delete), self.assertRaises(OSError):
+            self.cache._load_kernel_from_disk(key)
+
+    def test_miss_compiles_and_returns_result(self):
+        func = mock.MagicMock()
+        func.script.return_value = "script"
+        with (
+            mock.patch.object(self.cache, "_load_kernel_from_disk", return_value=None),
+            mock.patch.object(self.cache, "_save_kernel_to_disk"),
+        ):
+            result = self.cache.cached(func=func)
+        self.jit_kernel.assert_called_once()
+        self.assertIs(result, self.jit_kernel.return_value)
+
+    def test_disk_hot_cache_does_not_compile(self):
+        key = "k_hot"
+        self.write_entry(self.cache, key, with_lib=True)
+        fake_kernel = object()
+        func = mock.MagicMock()
+        func.script.return_value = "script"
+
+        # Compiling must fail if reached, proving the disk entry is what loads.
+        self.jit_kernel.side_effect = RuntimeError("compile must not be reached")
+        with (
+            mock.patch.object(self.cache, "_generate_key", return_value=key),
+            mock.patch.object(self.jit_kernel, "from_database", return_value=fake_kernel),
+        ):
+            result = self.cache.cached(func=func)
+        self.assertIs(result, fake_kernel)
+
 
 class TestTunerCacheRecovery(KernelCacheRecoveryMixin, unittest.TestCase):
     def setUp(self):
@@ -261,6 +317,18 @@ class TestTunerCacheRecovery(KernelCacheRecoveryMixin, unittest.TestCase):
 
     def test_unloadable_library_is_not_a_miss(self):
         self.assert_unloadable_library_reraises(self.cache, "t_elf")
+
+    def test_full_control_flow(self):
+        func = mock.MagicMock()
+        func.script.return_value = "script"
+        with (
+            mock.patch.object(self.cache, "_load_kernel_from_disk", return_value=None) as load,
+            mock.patch.object(self.cache, "_save_kernel_to_disk") as save,
+        ):
+            result = self.cache.cached(func=func)
+        self.assertIs(result, self.jit_kernel.return_value)
+        self.assertEqual(load.call_count, 2)
+        save.assert_called_once()
 
 
 class TestAutotuneResultRecovery(KernelCacheRecoveryMixin, unittest.TestCase):
@@ -283,8 +351,9 @@ class TestAutotuneResultRecovery(KernelCacheRecoveryMixin, unittest.TestCase):
         fake = object()
 
         def delete_then_fail(**kwargs):
-            Path(kwargs["kernel_lib_path"]).unlink()
-            raise OSError("cannot open shared object file")
+            lib_path = kwargs["kernel_lib_path"]
+            Path(lib_path).unlink()
+            raise OSError(f"{lib_path}: cannot open shared object file: No such file or directory")
 
         with mock.patch.object(self.jit_kernel, "from_database", side_effect=delete_then_fail):
             self.assertIsNone(self._load(entry))
@@ -306,6 +375,41 @@ class TestAutotuneResultRecovery(KernelCacheRecoveryMixin, unittest.TestCase):
 
         with mock.patch.object(self.jit_kernel, "from_database", side_effect=fail_without_deleting), self.assertRaises(OSError):
             self._load(entry)
+
+    def test_load_from_disk_metadata_deleted_returns_none(self):
+        entry = Path(self.tmp.name) / "meta_del"
+        entry.mkdir(parents=True, exist_ok=True)
+        (entry / "best_config.json").write_text('{"x": 1}')
+        with open(entry / "function.pkl", "wb") as f:
+            pickle.dump("fn", f)
+        (entry / "latency.json").write_text('{"latency": 0.1, "ref_latency": 0.2}')
+        (entry / "wrapped_kernel.cu").write_text("// kernel")
+        with open(entry / "params.pkl", "wb") as f:
+            pickle.dump([1], f)
+        (entry / "auto_gm_idx.pkl").write_text("[]")
+        (entry / "kernel_lib.so").write_bytes(b"fake library")
+        # Simulate the deletion window: the dir passed the existence check, but
+        # best_config.json is gone by the time it is opened.
+        (entry / "best_config.json").unlink()
+
+        self.assertIsNone(self.result_cls.load_from_disk(entry, self.param.CompileArgs()))
+
+    def test_save_to_disk_survives_cache_deletion(self):
+        entry = Path(self.tmp.name) / "save_del"
+        entry.mkdir(parents=True, exist_ok=True)
+        result = self.result_cls(
+            config={"x": 1},
+            func="fn",
+            kernel=mock.MagicMock(),
+            latency=0.1,
+            ref_latency=0.2,
+        )
+
+        def fail_open(path, *args, **kwargs):
+            raise FileNotFoundError(f"{path}: No such file or directory")
+
+        with mock.patch("builtins.open", side_effect=fail_open):
+            result.save_to_disk(entry)
 
 
 if __name__ == "__main__":

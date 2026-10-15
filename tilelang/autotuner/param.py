@@ -12,7 +12,7 @@ from pathlib import Path
 
 from tilelang.jit import JITKernel
 from tilelang.utils.target import determine_platform
-from tilelang.utils.file import atomic_copy, is_file_missing
+from tilelang.utils.file import atomic_copy, error_reports_missing_path, is_file_missing
 import cloudpickle
 import os
 from tilelang.engine.param import KernelParam
@@ -312,7 +312,15 @@ class AutotuneResult:
                     pass_configs=pass_configs,
                     compile_flags=compile_flags,
                 )
-            except OSError:
+            except PermissionError:
+                # The entry is present but unreadable; retuning would hit the
+                # same permission on the save path, so keep the original error.
+                raise
+            except OSError as error:
+                if not error_reports_missing_path(error, kernel_lib_path):
+                    # A dependency, ELF/ABI, or other loader error: not this cache
+                    # entry going missing, so preserve it.
+                    raise
                 if is_file_missing(kernel_lib_path):
                     logger.warning(
                         "Cached kernel library %s disappeared while loading; recompiling.",
@@ -330,26 +338,38 @@ class AutotuneResult:
         # save best config
         if verbose:
             logger.debug(f"Saving best config to file: {path / BEST_CONFIG_PATH}")
-        with open(path / BEST_CONFIG_PATH, "w") as f:
-            json.dump(self.config, f)
+        try:
+            with open(path / BEST_CONFIG_PATH, "w") as f:
+                json.dump(self.config, f)
+        except FileNotFoundError:
+            logger.warning("Cache disappeared while saving tuning result; skipping save: %s", path)
+            return
 
         # save function
         if verbose:
             logger.debug(f"Saving function to file: {path / FUNCTION_PATH}")
-        with open(path / FUNCTION_PATH, "wb") as f:
-            cloudpickle.dump(self.func, f)
+        try:
+            with open(path / FUNCTION_PATH, "wb") as f:
+                cloudpickle.dump(self.func, f)
+        except FileNotFoundError:
+            logger.warning("Cache disappeared while saving tuning result; skipping save: %s", path)
+            return
 
         # save ref latency
         if verbose:
             logger.debug(f"Saving latency to file: {path / LATENCY_PATH}")
-        with open(path / LATENCY_PATH, "w") as f:
-            json.dump(
-                {
-                    "latency": self.latency,
-                    "ref_latency": self.ref_latency,
-                },
-                f,
-            )
+        try:
+            with open(path / LATENCY_PATH, "w") as f:
+                json.dump(
+                    {
+                        "latency": self.latency,
+                        "ref_latency": self.ref_latency,
+                    },
+                    f,
+                )
+        except FileNotFoundError:
+            logger.warning("Cache disappeared while saving tuning result; skipping save: %s", path)
+            return
 
         # save kernel
         self._save_kernel_to_disk(path, self.kernel)
@@ -363,20 +383,32 @@ class AutotuneResult:
         # load best config
         if verbose:
             logger.debug(f"Loading best config from file: {path / BEST_CONFIG_PATH}")
-        with open(path / BEST_CONFIG_PATH) as f:
-            config = json.load(f)
+        try:
+            best_config_file = open(path / BEST_CONFIG_PATH)
+        except FileNotFoundError:
+            return None
+        with best_config_file:
+            config = json.load(best_config_file)
 
         # load function
         if verbose:
             logger.debug(f"Loading function from file: {path / FUNCTION_PATH}")
-        with open(path / FUNCTION_PATH, "rb") as f:
-            func = cloudpickle.load(f)
+        try:
+            function_file = open(path / FUNCTION_PATH, "rb")
+        except FileNotFoundError:
+            return None
+        with function_file:
+            func = cloudpickle.load(function_file)
 
         # load latency
         if verbose:
             logger.debug(f"Loading latency from file: {path / LATENCY_PATH}")
-        with open(path / LATENCY_PATH) as f:
-            latency = json.load(f)
+        try:
+            latency_file = open(path / LATENCY_PATH)
+        except FileNotFoundError:
+            return None
+        with latency_file:
+            latency = json.load(latency_file)
             latency, ref_latency = latency["latency"], latency["ref_latency"]
 
         kernel = cls._load_kernel_from_disk(

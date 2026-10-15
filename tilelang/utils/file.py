@@ -34,6 +34,20 @@ def is_file_missing(path: str | os.PathLike) -> bool:
     return False
 
 
+def error_reports_missing_path(error: OSError, path: str | os.PathLike) -> bool:
+    """Return whether ``error`` names ``path`` itself as the missing object.
+
+    ``ctypes.CDLL(path)`` raises :class:`OSError` whose message is
+    ``"<name>: cannot open shared object file: ..."`` where ``<name>`` is the
+    object the dynamic loader failed to load. For a missing target this is
+    ``path`` itself; for a missing dependency it is the dependency's name.
+    ``OSError.errno`` is ``None`` for both, so the message is the only way to
+    tell them apart. Only the target's basename is matched, so this stays a
+    narrow classification rather than a general error-text parser.
+    """
+    return os.path.basename(os.fspath(path)) in str(error)
+
+
 def atomic_copy(src: str | os.PathLike, dst: str | os.PathLike) -> None:
     """Publish a complete file without modifying an existing destination inode.
 

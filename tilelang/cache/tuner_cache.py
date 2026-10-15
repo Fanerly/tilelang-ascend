@@ -20,7 +20,7 @@ import logging
 
 from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
 from tilelang.version import __version__
-from tilelang.utils.file import atomic_copy, is_file_missing
+from tilelang.utils.file import atomic_copy, error_reports_missing_path, is_file_missing
 
 KERNEL_PATH = "kernel.cu"
 WRAPPED_KERNEL_PATH = "wrapped_kernel.cu"
@@ -339,7 +339,15 @@ class AutoTunerCache:
                     execution_backend=execution_backend,
                     pass_configs=pass_configs,
                 )
-            except OSError:
+            except PermissionError:
+                # The entry is present but unreadable; recompiling would hit the
+                # same permission on the save path, so keep the original error.
+                raise
+            except OSError as error:
+                if not error_reports_missing_path(error, kernel_lib_path):
+                    # A dependency, ELF/ABI, or other loader error: not this cache
+                    # entry going missing, so preserve it.
+                    raise
                 if is_file_missing(kernel_lib_path):
                     self.logger.warning(
                         "Cached kernel library %s disappeared while loading; recompiling.",
