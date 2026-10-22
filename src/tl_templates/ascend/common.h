@@ -15,6 +15,7 @@
 #endif
 
 #include "shmem.h"
+#include "tl_templates/ascend/reduce_2d_v2.h"
 
 #define CUDART_INF_F 1.0f / 0.0f
 
@@ -272,9 +273,63 @@ CATLASS_DEVICE void
 copy_ub_to_gm(GlobalTensor<T> dstTensor, LocalTensor<T> srcTensor,
               uint32_t realdstN = 1, uint32_t maskShapeM = srcM,
               uint32_t maskShapeN = srcN) {
-  AscendC::DataCopyExtParams dataCopyParams(
-      maskShapeM, maskShapeN * sizeof(T), (srcN - maskShapeN) * sizeof(T) / 32,
-      (realdstN - maskShapeN) * sizeof(T), 0);
+  // MTE3 (UB -> GM) copy semantics (dav-c220 / dav-c310):
+  //  * per burst the UB source advances ceil(blockLen / 32) + srcStride
+  //    whole 32B blocks - the "narrow UB rows sit in 32B slots" convention
+  //    (MTE-filled buffers and the packed-mask helpers write rows on 32B
+  //    boundaries);
+  //  * the GM-side stride is byte granular - destination addresses need no
+  //    alignment;
+  //  * blockLen is a 16-bit field (max 65535), blockCount a 12-bit field
+  //    (max 4095).
+  // A compact sub-32B-pitch multi-row source (e.g. a V-pipe (M, 1) fp32
+  // keepdim reduce result, issue #1682) breaks that slot stepping; when
+  // both sides are packed the copy is one contiguous slab, emitted as a
+  // single flat burst.
+  // bisheng's cross-pipe dependency sync only covers straight-line code: a
+  // GM scalar store beside a DataCopyPad (notably in a sibling branch) or a
+  // runtime branch around the call makes it miscompile and deadlock the MTE3
+  // queue. So the DataCopyPad below stays straight-line and unconditional,
+  // and what the engine cannot express aborts explicitly instead of
+  // silently corrupting.
+  constexpr uint32_t kBlockBytes = 32;
+  const uint32_t blockLen = maskShapeN * sizeof(T);
+  const uint32_t srcPitch = srcN * sizeof(T);
+  const uint32_t dstPitch = realdstN * sizeof(T);
+  if (blockLen == 0 || maskShapeM == 0) {
+    return;
+  }
+
+  const bool packed = srcN == maskShapeN && realdstN == maskShapeN;
+  const uint64_t total = static_cast<uint64_t>(maskShapeM) * blockLen;
+  const bool flat = packed && total <= 65535;
+  // A srcPitch >= 32B that is not a 32B multiple (e.g. a compact (M, 10)
+  // fp32 source, 40B rows) can be read by neither DMA form: no srcStride
+  // makes the multi-burst step such a pitch, and per-row single bursts
+  // would need 32B-aligned sources (device: MTE ADDR_MISALIGN); a scalar
+  // fallback is barred by the bisheng constraint above. Only the
+  // single-burst forms (one row, or both sides packed) are correct - abort
+  // the rest via trap(), since ASCENDC_ASSERT compiles to nothing in a
+  // real device build.
+  if constexpr (srcPitch % kBlockBytes != 0 && srcPitch >= kBlockBytes) {
+    if (!(maskShapeM == 1 || flat)) {
+      trap();
+    }
+  }
+  // Flat form (both sides packed): one burst covers the whole slab.
+  // Everything else keeps the classic multi-burst.
+  uint32_t blockCount = maskShapeM;
+  uint32_t burstLen = blockLen;
+  uint32_t srcStride = (srcPitch - blockLen) / kBlockBytes;
+  uint32_t dstStride = dstPitch - blockLen;
+  if (flat) {
+    blockCount = 1;
+    burstLen = static_cast<uint32_t>(total);
+    srcStride = 0;
+    dstStride = 0;
+  }
+  AscendC::DataCopyExtParams dataCopyParams(blockCount, burstLen, srcStride,
+                                            dstStride, 0);
   AscendC::DataCopyPad(dstTensor, srcTensor, dataCopyParams);
 }
 
@@ -490,33 +545,33 @@ reduce_sum_half(LocalTensor<T> const &dstTensor,
 // stride, so one repeat per row with srcRepStride set to the PHYSICAL row width
 // reduces the intended region. One repeat covers at most 256 bytes, which is
 // what bounds the usable width.
-template <typename T>
+template <typename T, bool isSetMask = true>
 CATLASS_DEVICE void
 reduce_max_narrow(LocalTensor<T> const &dstTensor,
                   LocalTensor<T> const &srcTensor, const int32_t mask,
                   const int32_t repeatTime, const int32_t srcRepStride) {
-  AscendC::WholeReduceMax<T>(dstTensor, srcTensor, mask, repeatTime, 1, 1,
-                             srcRepStride,
-                             AscendC::ReduceOrder::ORDER_ONLY_VALUE);
+  AscendC::WholeReduceMax<T, isSetMask>(dstTensor, srcTensor, mask, repeatTime,
+                                        1, 1, srcRepStride,
+                                        AscendC::ReduceOrder::ORDER_ONLY_VALUE);
 }
 
-template <typename T>
+template <typename T, bool isSetMask = true>
 CATLASS_DEVICE void
 reduce_min_narrow(LocalTensor<T> const &dstTensor,
                   LocalTensor<T> const &srcTensor, const int32_t mask,
                   const int32_t repeatTime, const int32_t srcRepStride) {
-  AscendC::WholeReduceMin<T>(dstTensor, srcTensor, mask, repeatTime, 1, 1,
-                             srcRepStride,
-                             AscendC::ReduceOrder::ORDER_ONLY_VALUE);
+  AscendC::WholeReduceMin<T, isSetMask>(dstTensor, srcTensor, mask, repeatTime,
+                                        1, 1, srcRepStride,
+                                        AscendC::ReduceOrder::ORDER_ONLY_VALUE);
 }
 
-template <typename T>
+template <typename T, bool isSetMask = true>
 CATLASS_DEVICE void
 reduce_sum_narrow(LocalTensor<T> const &dstTensor,
                   LocalTensor<T> const &srcTensor, const int32_t mask,
                   const int32_t repeatTime, const int32_t srcRepStride) {
-  AscendC::WholeReduceSum<T>(dstTensor, srcTensor, mask, repeatTime, 1, 1,
-                             srcRepStride);
+  AscendC::WholeReduceSum<T, isSetMask>(dstTensor, srcTensor, mask, repeatTime,
+                                        1, 1, srcRepStride);
 }
 
 template <typename T, uint32_t M, uint32_t N, int32_t dim>
@@ -667,6 +722,20 @@ reduce_min(LocalTensor<T> const &dstTensor, LocalTensor<T> const &srcTensor,
     dstTensor.SetValue(i, reduce_scalar_min_safe(reducedValue, backupValue));
   }
 }
+
+// Expose the helper's Vector pipe to BiSheng automatic synchronization.
+#pragma begin_pipe(V)
+template <typename T, reduce2d_v2::Reduce2DKind Kind, bool Clear, uint32_t M,
+          uint32_t N, int32_t Dim, uint32_t PhysicalRow, bool AllowRepeatZero>
+CATLASS_DEVICE void reduce_2d(LocalTensor<T> const &dstTensor,
+                              LocalTensor<T> const &srcTensor,
+                              LocalTensor<T> const &sharedTmpBuffer) {
+  static_assert(std::is_same_v<T, float> && Dim == -1,
+                "Reduce2D v2 only supports fp32 row reduction");
+  reduce2d_v2::Reduce2D<T, Kind, Clear, M, N, PhysicalRow, AllowRepeatZero>(
+      dstTensor, srcTensor, sharedTmpBuffer);
+}
+#pragma end_pipe
 
 // ===================== Tail-aware vector helpers =========================
 // AscendTailMaskPropagation rewrites vector ops on tail UB tiles to these
@@ -1647,7 +1716,8 @@ Broadcast(const LocalTensor<T> &dst, const LocalTensor<T> &src,
                                                   sharedTmpBuffer);
 }
 
-template <typename T, int32_t dim, int32_t axis, bool isReuseSource = false>
+template <typename T, int32_t dim, int32_t axis, bool isReuseSource = false,
+          bool isSetMask = true>
 CATLASS_DEVICE void
 Broadcast(const LocalTensor<T> &dst, const LocalTensor<T> &src,
           const uint32_t dstShape[dim], const uint32_t srcShape[dim]) {
@@ -1658,14 +1728,25 @@ Broadcast(const LocalTensor<T> &dst, const LocalTensor<T> &src,
     srcSize *= srcShape[i];
   }
   if (srcSize == dstSize) {
-    AscendC::Muls(dst, src, static_cast<T>(1), dstSize);
+    if constexpr (isSetMask) {
+      AscendC::Muls(dst, src, static_cast<T>(1), dstSize);
+    } else {
+      AscendC::Muls<T, false>(dst, src, static_cast<T>(1),
+                              AscendC::MASK_PLACEHOLDER, 1,
+                              AscendC::UnaryRepeatParams());
+    }
     return;
   }
   ASCENDC_ASSERT((srcSize == 1), {
     KERNEL_LOG(KERNEL_ERROR,
                "Workspace-free Broadcast only supports equal or scalar shapes");
   });
-  AscendC::Duplicate(dst, src.GetValue(0), dstSize);
+  if constexpr (isSetMask) {
+    AscendC::Duplicate(dst, src.GetValue(0), dstSize);
+  } else {
+    AscendC::Duplicate<T, false>(dst, src.GetValue(0),
+                                 AscendC::MASK_PLACEHOLDER, 1, 1, 8);
+  }
 }
 
 template <typename T>
@@ -1935,7 +2016,7 @@ CATLASS_DEVICE void
 Fill_experiment(const LocalTensor<T> &dst, const T &scalarValue, uint64_t mask0,
                 const uint8_t repeatTime, const uint16_t dstBlockStride,
                 const uint8_t dstRepeatStride) {
-  uint64_t mask[1] = {mask0};
+  uint64_t mask[2] = {mask0, 0};
   AscendC::Duplicate(dst, scalarValue, mask, repeatTime, dstBlockStride,
                      dstRepeatStride);
 }

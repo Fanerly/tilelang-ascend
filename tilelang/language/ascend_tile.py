@@ -1027,6 +1027,27 @@ def brcb_experiment(
     )
 
 
+def _validate_binary_op_region(br: BufferRegion, op: str, arg_name: str) -> None:
+    """Reject BufferRegions that are not contiguous when flattened.
+
+    ``binary_op`` lowers a region to a single linear vector operation, so a
+    column-offset slice such as ``buf[:, 8:40]`` silently loses its per-row
+    layout: a 32-byte-aligned offset computes over the wrong elements and an
+    unaligned one raises aicore exception 507015. Only regions that select a
+    contiguous linear span (whole buffer, whole rows, a single row, or a 1D
+    slice) keep the linear semantics.
+    """
+    try:
+        _validate_buffer_region_contiguity(br, require_flat_contiguous=True)
+    except ValueError as err:
+        raise ValueError(
+            f"T.tile.{op} requires {arg_name} to be contiguous when flattened; only "
+            f"whole-row / whole-buffer / 1D contiguous regions are supported, and "
+            f"column-offset slices produce wrong results or aicore exception 507015. "
+            f"Detail: {err}"
+        ) from err
+
+
 def binary_op(
     dst: Buffer | BufferRegion,
     src0: Buffer | BufferRegion,
@@ -1034,11 +1055,13 @@ def binary_op(
     op: str,
 ):
     if isinstance(dst, BufferRegion):
+        _validate_binary_op_region(dst, op, "dst")
         dst_ptr, dst_extent = _handle_buffer_region(dst, "w")
     else:
         dst_ptr = dst.access_ptr("w")
         dst_extent = dst.shape
     if isinstance(src0, BufferRegion):
+        _validate_binary_op_region(src0, op, "src0")
         src0_ptr, src0_extent = _handle_buffer_region(src0, "r")
     else:
         src0_ptr = src0.access_ptr("r")
@@ -1063,6 +1086,7 @@ def binary_op(
     elif isinstance(src1, (PrimExpr, float, int)):
         return T.call_intrin("handle", tir.op.Op.get(f"tl.ascend_{op}s"), dst_ptr, src0_ptr, src1, size_0)
     elif isinstance(src1, BufferRegion):
+        _validate_binary_op_region(src1, op, "src1")
         src1_ptr, src1_extent = _handle_buffer_region(src1, "r")
         size_2 = math.prod(src1_extent)
         assert size_0 == size_2, "size must be same"
@@ -1114,9 +1138,7 @@ def sub(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, src1: Buffer | 
     Notes:
         - dst and src0 must have equal sizes; all tensor operands must share
           the same dtype, while a scalar src1 is auto-cast to the buffer dtype.
-        - Supported dtypes: float16, float32, int16, int32. A BufferLoad src1
-          with int16/int32 is supported on the pto backend only (ascendc fails
-          to compile).
+        - Supported dtypes: float16, float32, int16, int32.
         - A scalar src1 is applied via `AscendC::Adds(dst, src0, -src1)`.
         - A scalar is supported as src1 (right operand) only: subtraction is
           non-commutative, so `scalar - buffer` (e.g. `2.0 - buf`) cannot be
@@ -1268,10 +1290,30 @@ def sigmoid(
     *,
     tmp: Buffer | BufferRegion | None = None,
 ):
-    """Compute sigmoid, optionally using explicit UB scratch storage.
+    """Performs element-wise Sigmoid activation: dst[i] = 1 / (1 + exp(-src[i])).
 
-    ``tmp`` may use any fixed-width scalar dtype; lowering reinterprets its
-    storage for the selected backend.
+    Args:
+        dst: The destination buffer; it must not alias src.
+        src: The source, a buffer or a contiguous region of it.
+        tmp: Optional explicit UB scratch storage, used by the AscendC backend
+            only. It may use any fixed-width scalar dtype; lowering
+            reinterprets its storage for the selected backend.
+
+    Notes:
+        - dst and src should have equal element counts (no runtime check;
+          mismatched sizes produce undefined results).
+        - Supported dtypes: float16, float32 (Ascend A2 / A3).
+        - Operand addresses must be 32-byte aligned (hardware constraint).
+        - ``tmp`` applies to the AscendC backend only: a temporary buffer of
+          ``N x sizeof(dtype)`` bytes (N = element count) is auto-allocated
+          when not provided; the PTO backend uses no temporary buffer and
+          ignores an explicitly passed ``tmp``.
+        - On the PTO backend, ``src`` is modified in place by the call and no
+          longer holds the original input; copy it to another buffer first if
+          the data is needed afterwards. The AscendC backend leaves ``src``
+          unchanged.
+        - Special values: sigmoid(0)=0.5, sigmoid(-inf)=0, sigmoid(inf)=1,
+          sigmoid(nan)=nan.
     """
     if isinstance(dst, BufferRegion):
         dst_ptr, buffer_extent = _handle_buffer_region(dst, "w")
@@ -1288,20 +1330,26 @@ def sigmoid(
 
 
 def silu(dst: Buffer | BufferRegion, src: Buffer | BufferRegion):
-    """Performs element-wise SiLU (Swish) activation: dst = src * sigmoid(src).
+    """Performs element-wise SiLU (Swish) activation: dst[i] = src[i] * sigmoid(src[i]).
 
-    SiLU (Sigmoid Linear Unit) is also known as Swish activation function.
+    SiLU (Sigmoid Linear Unit) is also known as Swish activation function:
+    dst[i] = src[i] / (1 + exp(-src[i])).
 
     Args:
         dst: The destination buffer where the result will be stored.
         src: The source buffer.
 
-    Returns:
-        A TVM intrinsic call that performs the Silu operation.
-
-    Note:
-        - Supports data types: half, float (Atlas A2/A3)
-        - SiLU = x * sigmoid(x) = x / (1 + exp(-x))
+    Notes:
+        - dst and src should have equal element counts (no runtime check;
+          mismatched sizes produce undefined results).
+        - Supported dtypes: float16, float32 (Ascend A2 / A3).
+        - Operand addresses must be 32-byte aligned (hardware constraint).
+        - On the PTO backend, ``src`` is modified in place by the call and no
+          longer holds the original input; copy it to another buffer first if
+          the data is needed afterwards. The AscendC backend leaves ``src``
+          unchanged.
+        - Special values follow IEEE semantics: silu(-inf)=nan, silu(inf)=inf,
+          silu(nan)=nan.
     """
     if isinstance(dst, BufferRegion):
         dst_ptr, buffer_extent = _handle_buffer_region(dst, "w")
@@ -1374,11 +1422,16 @@ def rsqrt(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion):
 
 
 def relu(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion):
-    """Performs element-wise Rectified Linear Unit (ReLU): dst = max(0, src0).
+    """Performs element-wise Rectified Linear Unit: `dst[i] = max(0, src0[i])`.
 
     Args:
-        dst: The destination buffer.
-        src0: The source buffer.
+        dst: The destination buffer; it may alias src0 (in-place).
+        src0: The source, a buffer or a contiguous region of it.
+
+    Notes:
+        - dst and src0 must have equal element counts.
+        - Supported dtypes: float16, float32.
+        - Operand addresses must be 32-byte aligned (hardware constraint).
     """
     return unary_op(dst, src0, "relu")
 
@@ -1426,14 +1479,17 @@ def scalar_op(
 
 
 def leaky_relu(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, scalar_value: PrimExpr):  # type: ignore  # noqa: F821
-    """Performs element-wise Leaky ReLU activation.
-
-    Formula: dst = src0 if src0 >= 0 else src0 * scalar_value
+    """Performs element-wise Leaky ReLU: dst[i] = src0[i] if src0[i] >= 0 else src0[i] * scalar_value.
 
     Args:
-        dst: The destination buffer.
-        src0: The source buffer.
+        dst: The destination buffer; it may alias src0 (in-place).
+        src0: The source, a buffer or a contiguous region of it.
         scalar_value: The negative slope coefficient.
+
+    Notes:
+        - dst and src0 must have equal element counts.
+        - Supported dtypes: float16, float32.
+        - Operand addresses must be 32-byte aligned (hardware constraint).
     """
     return scalar_op(dst, src0, scalar_value, "leaky_relu")
 
