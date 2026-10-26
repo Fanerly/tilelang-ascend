@@ -1566,29 +1566,74 @@ def mul_add_dst(
     )
 
 
-def bitwise_lshift(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, scalarValue: PrimExpr):  # noqa: F821
+def bitwise_lshift(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, scalarValue: Buffer | BufferRegion | PrimExpr):  # noqa: F821
     """Performs element-wise bitwise left shift: dst = src0 << scalarValue.
 
+    ``scalarValue`` may be either a scalar shift amount or a per-element
+    shift-amount buffer (or a contiguous region of one). The scalar form
+    lowers to ``TSHLS`` on the PTO backend and ``AscendC::ShiftLeft`` on the
+    AscendC backend. The tensor form (per-element shift amounts) lowers to
+    ``TSHL`` and is supported only on the PTO backend for A2/A3; the AscendC
+    backend rejects it because its ``ShiftLeft`` tensor variant is not
+    available on A2/A3.
+
     Args:
-        dst: The destination buffer.
-        src0: The source buffer.
-        scalarValue: The number of bits to shift (scalar).
+        dst: The destination buffer (UB).
+        src0: The source buffer (UB).
+        scalarValue: The number of bits to shift (scalar), or a per-element
+            shift-amount buffer / buffer region. The tensor form must share
+            ``src0``'s dtype and shape, and must also live in UB.
     """
     if isinstance(dst, BufferRegion):
+        _validate_binary_op_region(dst, "bitwise_lshift", "dst")
         dst_ptr, dst_extent = _handle_buffer_region(dst, "w")
-        size_2 = math.prod(dst_extent)
     else:
         dst_ptr = dst.access_ptr("w")
-        size_2 = math.prod(dst.shape)
+        dst_extent = dst.shape
 
     if isinstance(src0, BufferRegion):
+        _validate_binary_op_region(src0, "bitwise_lshift", "src0")
         src0_ptr, src0_extent = _handle_buffer_region(src0, "r")
-        size_0 = math.prod(src0_extent)
     else:
         src0_ptr = src0.access_ptr("r")
-        size_0 = math.prod(src0.shape)
+        src0_extent = src0.shape
 
+    size_0 = math.prod(src0_extent)
+    size_2 = math.prod(dst_extent)
     assert size_0 == size_2, "size must be same"
+
+    if isinstance(scalarValue, (Buffer, BufferRegion)):
+        # Tensor (per-element) shift-amount path. Lowered to PTO TSHL; rejected
+        # by the AscendC backend at codegen time.
+        if isinstance(scalarValue, BufferRegion):
+            _validate_binary_op_region(scalarValue, "bitwise_lshift", "scalarValue")
+            shift_ptr, shift_extent = _handle_buffer_region(scalarValue, "r")
+        else:
+            shift_ptr = scalarValue.access_ptr("r")
+            shift_extent = scalarValue.shape
+
+        assert size_0 == math.prod(shift_extent), "size must be same"
+        if not (_shapes_equal(list(dst_extent), list(src0_extent)) and
+                _shapes_equal(list(dst_extent), list(shift_extent))):
+            raise ValueError(
+                "T.tile.bitwise_lshift with a tensor shift amount requires dst, "
+                "src0 and scalarValue to have identical shapes.")
+        dst_dtype = DataType(_underlying_buffer(dst).dtype)
+        src0_dtype = DataType(_underlying_buffer(src0).dtype)
+        shift_dtype = DataType(_underlying_buffer(scalarValue).dtype)
+        if not (dst_dtype == src0_dtype == shift_dtype):
+            raise ValueError(
+                "T.tile.bitwise_lshift with a tensor shift amount requires dst, "
+                "src0 and scalarValue to have the same dtype.")
+
+        return tir.call_intrin(
+            "handle",
+            tir.op.Op.get("tl.ascend_bitwise_lshift_tensor"),
+            dst_ptr,
+            src0_ptr,
+            shift_ptr,
+            size_0,
+        )
 
     return tir.call_intrin(
         "handle",

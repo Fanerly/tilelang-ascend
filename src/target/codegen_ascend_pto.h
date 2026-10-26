@@ -231,6 +231,7 @@ private:
                                const ShapeInfo &src_info);
 
   void TshCodegen(const CallNode *op, const std::string &op_name);
+  void TshTensorCodegen(const CallNode *op);
 
   void ArithProgressionCodegen(const CallNode *op, const std::string &op_name);
 
