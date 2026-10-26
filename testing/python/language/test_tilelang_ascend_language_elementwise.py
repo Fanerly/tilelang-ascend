@@ -984,10 +984,15 @@ def run_test_bitwise_lshift_tensor(M, N, block_M, block_N, dtype, target):
 
     total = M * N
     idx = torch.arange(total, dtype=torch.int64)
-    # Deterministic pseudo-random 0/1 coverage including 0, 0x8000 (negative),
-    # 0x5555/0xAAAA and boundary values.
+    # Deterministic pseudo-random bit patterns: 0x9E3779B1 is odd, so
+    # idx*0x9E3779B1 mod 2**width is a permutation of [0, 2**width) and covers
+    # every bit pattern, including 0, the highest bit 0x8000/0x80000000 (which
+    # is negative in the signed dtypes), 0xFFFF/0xFFFFFFFF (-1), and 0x5555/
+    # 0xAAAA. s_codes = idx % width is a per-element shift amount spanning
+    # [0, width-1], so both shift 0 and shift width-1 are exercised, and each
+    # element gets a different shift (distinguishes TSHL from a scalar TSHLS).
     a_codes = (idx * 0x9E3779B1) & mask
-    s_codes = idx % width  # per-element SHIFT AMOUNT differs -> distinguishes TSHL/TSHLS
+    s_codes = idx % width
 
     sign_bit = 1 << (width - 1)
     if signed:
@@ -1157,6 +1162,16 @@ def test_bitwise_lshift_tensor_bad_dtype():
     dst = tir.decl_buffer((64, 256), "int16", scope="shared.ub")
     src = tir.decl_buffer((64, 256), "int16", scope="shared.ub")
     shift = tir.decl_buffer((64, 256), "int32", scope="shared.ub")
+    with pytest.raises(ValueError):
+        T.tile.bitwise_lshift(dst, src, shift)
+
+
+@pytest.mark.parametrize("dtype", ["int8", "uint8"])
+def test_bitwise_lshift_tensor_int8_rejected(dtype):
+    """int8/uint8 are not supported (kept consistent with the scalar form)."""
+    dst = tir.decl_buffer((64, 256), dtype, scope="shared.ub")
+    src = tir.decl_buffer((64, 256), dtype, scope="shared.ub")
+    shift = tir.decl_buffer((64, 256), dtype, scope="shared.ub")
     with pytest.raises(ValueError):
         T.tile.bitwise_lshift(dst, src, shift)
 
