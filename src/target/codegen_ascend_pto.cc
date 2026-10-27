@@ -1056,7 +1056,7 @@ void CodeGenTileLangAscendPto::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(tl::ascend_bitwise_lshift())) {
     TshCodegen(op, "TSHLS");
   } else if (op->op.same_as(tl::ascend_bitwise_lshift_tensor())) {
-    TshTensorCodegen(op);
+    BinaryVecOpCodegen(op, "TSHL");
   } else if (op->op.same_as(tl::ascend_bitwise_rshift())) {
     TshCodegen(op, "TSHRS");
   } else if (op->op.same_as(tl::ascend_arith_progression())) {
@@ -2630,20 +2630,6 @@ void CodeGenTileLangAscendPto::CompareScalarCodegen(
   this->stream << kAscendPtoScope << "compare_scalar(" << dst_name << ", "
                << src0_name << ", " << src1_name << ", "
                << "CmpMode::" << mode << ");\n";
-}
-
-void CodeGenTileLangAscendPto::TshTensorCodegen(const CallNode *op) {
-  ShapeInfo src0_shape_info = GetSliceInfo(op->args[1].as<CallNode>());
-  ShapeInfo src1_shape_info = GetSliceInfo(op->args[2].as<CallNode>());
-  ShapeInfo dst_shape_info = GetSliceInfo(op->args[0].as<CallNode>());
-
-  std::string src0_name = ResolveUbSliceName(src0_shape_info);
-  std::string src1_name = ResolveUbSliceName(src1_shape_info);
-  std::string dst_name = ResolveUbSliceName(dst_shape_info);
-
-  this->PrintIndent();
-  this->stream << "TSHL(" << dst_name << ", " << src0_name << ", "
-               << src1_name << ");\n";
 }
 
 void CodeGenTileLangAscendPto::TshCodegen(const CallNode *op,

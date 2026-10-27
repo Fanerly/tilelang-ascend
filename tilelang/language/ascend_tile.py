@@ -1600,14 +1600,12 @@ def bitwise_lshift(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, scal
         are not guaranteed to produce defined results.
     """
     if isinstance(dst, BufferRegion):
-        _validate_binary_op_region(dst, "bitwise_lshift", "dst")
         dst_ptr, dst_extent = _handle_buffer_region(dst, "w")
     else:
         dst_ptr = dst.access_ptr("w")
         dst_extent = dst.shape
 
     if isinstance(src0, BufferRegion):
-        _validate_binary_op_region(src0, "bitwise_lshift", "src0")
         src0_ptr, src0_extent = _handle_buffer_region(src0, "r")
     else:
         src0_ptr = src0.access_ptr("r")
@@ -1620,6 +1618,10 @@ def bitwise_lshift(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, scal
     if isinstance(scalarValue, (Buffer, BufferRegion)):
         # Tensor (per-element) shift-amount path. Lowered to PTO TSHL; rejected
         # by the AscendC backend at codegen time.
+        if isinstance(dst, BufferRegion):
+            _validate_binary_op_region(dst, "bitwise_lshift", "dst")
+        if isinstance(src0, BufferRegion):
+            _validate_binary_op_region(src0, "bitwise_lshift", "src0")
         if isinstance(scalarValue, BufferRegion):
             _validate_binary_op_region(scalarValue, "bitwise_lshift", "scalarValue")
             shift_ptr, shift_extent = _handle_buffer_region(scalarValue, "r")

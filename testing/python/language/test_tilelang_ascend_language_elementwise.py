@@ -984,17 +984,33 @@ def run_test_bitwise_lshift_tensor(M, N, block_M, block_N, dtype, target):
 
     total = M * N
     idx = torch.arange(total, dtype=torch.int64)
-    # Deterministic pseudo-random bit patterns: 0x9E3779B1 is odd, so
-    # idx*0x9E3779B1 mod 2**width is a permutation of [0, 2**width) and covers
-    # every bit pattern, including 0, the highest bit 0x8000/0x80000000 (which
-    # is negative in the signed dtypes), 0xFFFF/0xFFFFFFFF (-1), and 0x5555/
-    # 0xAAAA. s_codes = idx % width is a per-element shift amount spanning
-    # [0, width-1], so both shift 0 and shift width-1 are exercised, and each
-    # element gets a different shift (distinguishes TSHL from a scalar TSHLS).
+    # Deterministic pseudo-random bit patterns for broad per-element coverage.
+    # s_codes = idx % width gives per-element shift amounts spanning
+    # [0, width-1], so shift 0 and shift width-1 both occur and different
+    # elements get different shifts (distinguishing TSHL from a scalar TSHLS).
     a_codes = (idx * 0x9E3779B1) & mask
     s_codes = idx % width
 
+    # Explicitly plant a handful of key bit patterns at the head, each with a
+    # specific legal shift amount: 0, 1, the highest bit only (also with a
+    # NON-ZERO shift), all-ones, and alternating patterns.
     sign_bit = 1 << (width - 1)
+    alt_a = 0xAAAA if width == 16 else 0xAAAAAAAA
+    alt_5 = 0x5555 if width == 16 else 0x55555555
+    explicit = [
+        (0, 0),
+        (1, 1),
+        (sign_bit, 1),
+        (sign_bit, width - 1),
+        (mask, 0),
+        (mask, 1),
+        (alt_a, 1),
+        (alt_5, width - 1),
+    ]
+    for i, (code, shift) in enumerate(explicit):
+        a_codes[i] = code
+        s_codes[i] = shift
+
     if signed:
         a_vals = torch.where(a_codes >= sign_bit, a_codes - (1 << width), a_codes).to(torch_dtype)
         s_vals = s_codes.to(torch_dtype)
@@ -1120,31 +1136,10 @@ def test_bitwise_lshift_tensor_slice(dtype, shape):
 
 def test_bitwise_lshift_tensor_ascendc_rejected():
     """AscendC backend must reject the tensor shift-amount form."""
-    dtype = "int16"
-    M, N = 128, 256
-    m_num = M // 128
-    n_num = N // 256
-    VEC_NUM = 2
-
-    @T.prim_func
-    def main(
-        A: T.Tensor((M, N), dtype),
-        S: T.Tensor((M, N), dtype),
-        B: T.Tensor((M, N), dtype),
-    ):
-        with T.Kernel(m_num * n_num, is_npu=True) as (cid, vid):
-            bx = cid // n_num
-            by = cid % n_num
-            a_ub = T.alloc_ub((128 // VEC_NUM, 256), dtype)
-            s_ub = T.alloc_ub((128 // VEC_NUM, 256), dtype)
-            b_ub = T.alloc_ub((128 // VEC_NUM, 256), dtype)
-            T.copy(A[bx * 128 + vid * 128 // VEC_NUM, by * 256], a_ub)
-            T.copy(S[bx * 128 + vid * 128 // VEC_NUM, by * 256], s_ub)
-            T.tile.bitwise_lshift(b_ub, a_ub, s_ub)
-            T.copy(b_ub, B[bx * 128 + vid * 128 // VEC_NUM, by * 256])
-
-    with pytest.raises(Exception):
-        tilelang.compile(main, out_idx=[-1], pass_configs=pass_configs, target="ascendc")
+    func = bitwise_lshift_tensor(128, 256, 128, 256, "int16")
+    with pytest.raises(tilelang.tvm.error.TVMError,
+                       match="does not support tensor shift amounts"):
+        tilelang.compile(func, out_idx=[-1], pass_configs=pass_configs, target="ascendc")
 
 
 def test_bitwise_lshift_tensor_bad_shape():
