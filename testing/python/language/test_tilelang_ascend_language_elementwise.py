@@ -1118,12 +1118,9 @@ def test_bitwise_rshift_int64_no_compiler_crash(dtype, target):
     """Compiling int64/uint64 rshift must raise a diagnostic, not SIGSEGV."""
     proc = _compile_rshift_in_subprocess(dtype, target)
     assert proc.returncode == 1, (
-        f"expected a Python exception (rc=1) for {dtype}/{target}, got rc={proc.returncode}; "
-        f"stderr={proc.stderr!r}"
+        f"expected a Python exception (rc=1) for {dtype}/{target}, got rc={proc.returncode}; stderr={proc.stderr!r}"
     )
-    assert "bitwise_rshift supports" in proc.stderr, (
-        f"missing unsupported-dtype diagnostic in stderr: {proc.stderr!r}"
-    )
+    assert "bitwise_rshift supports" in proc.stderr, f"missing unsupported-dtype diagnostic in stderr: {proc.stderr!r}"
 
 
 def bitwise_rshift_slice(M, N, block_M, block_N, scalarvalue, dtype="int32"):
