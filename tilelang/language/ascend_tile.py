@@ -1630,26 +1630,21 @@ def bitwise_lshift(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, scal
             shift_extent = scalarValue.shape
 
         assert size_0 == math.prod(shift_extent), "size must be same"
-        if not (_shapes_equal(list(dst_extent), list(src0_extent)) and
-                _shapes_equal(list(dst_extent), list(shift_extent))):
+        if not (_shapes_equal(list(dst_extent), list(src0_extent)) and _shapes_equal(list(dst_extent), list(shift_extent))):
             raise ValueError(
-                "T.tile.bitwise_lshift with a tensor shift amount requires dst, "
-                "src0 and scalarValue to have identical shapes.")
+                "T.tile.bitwise_lshift with a tensor shift amount requires dst, src0 and scalarValue to have identical shapes."
+            )
         dst_dtype = DataType(_underlying_buffer(dst).dtype)
         src0_dtype = DataType(_underlying_buffer(src0).dtype)
         shift_dtype = DataType(_underlying_buffer(scalarValue).dtype)
         if not (dst_dtype == src0_dtype == shift_dtype):
-            raise ValueError(
-                "T.tile.bitwise_lshift with a tensor shift amount requires dst, "
-                "src0 and scalarValue to have the same dtype.")
+            raise ValueError("T.tile.bitwise_lshift with a tensor shift amount requires dst, src0 and scalarValue to have the same dtype.")
         if dst_dtype not in _BITWISE_LSHIFT_DTYPES:
             # Keep the tensor form consistent with the scalar form (AscendC
             # ShiftLeft and PTO TSHLS): only 16/32-bit signed/unsigned integers.
             # PTO TSHL itself also accepts int8/uint8, but the scalar form does
             # not, so those are rejected here for API consistency.
-            raise ValueError(
-                "T.tile.bitwise_lshift supports int16/uint16/int32/uint32; "
-                f"got {dst_dtype}.")
+            raise ValueError(f"T.tile.bitwise_lshift supports int16/uint16/int32/uint32; got {dst_dtype}.")
 
         return tir.call_intrin(
             "handle",

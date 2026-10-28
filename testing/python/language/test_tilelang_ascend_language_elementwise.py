@@ -938,8 +938,7 @@ def _lshift_tensor_reference(a_cpu, s_cpu, width, signed):
     if signed:
         sign_bit = 1 << (width - 1)
         torch_dtype = torch.int16 if width == 16 else torch.int32
-        return torch.where(ref_codes >= sign_bit, ref_codes - (1 << width),
-                           ref_codes).to(torch_dtype)
+        return torch.where(ref_codes >= sign_bit, ref_codes - (1 << width), ref_codes).to(torch_dtype)
     torch_dtype = torch.uint16 if width == 16 else torch.uint32
     return ref_codes.to(torch_dtype)
 
@@ -978,8 +977,7 @@ def run_test_bitwise_lshift_tensor(M, N, block_M, block_N, dtype, target):
 
     width = 16 if dtype in ["int16", "uint16"] else 32
     signed = dtype.startswith("int")
-    torch_dtype = {"int16": torch.int16, "int32": torch.int32,
-                   "uint16": torch.uint16, "uint32": torch.uint32}[dtype]
+    torch_dtype = {"int16": torch.int16, "int32": torch.int32, "uint16": torch.uint16, "uint32": torch.uint32}[dtype]
     mask = (1 << width) - 1
 
     total = M * N
@@ -1073,7 +1071,7 @@ def bitwise_lshift_tensor_slice(M, N, block_M, block_N, dtype="int16"):
             T.copy(S[bx * block_M + vid * block_M // VEC_NUM, by * block_N], s_ub)
             T.tile.fill(b_ub, sentinel)
             for i in range(block_M // VEC_NUM):
-                T.tile.bitwise_lshift(b_ub[i, 1:block_N - 1], a_ub[i, 1:block_N - 1], s_ub[i, 1:block_N - 1])
+                T.tile.bitwise_lshift(b_ub[i, 1 : block_N - 1], a_ub[i, 1 : block_N - 1], s_ub[i, 1 : block_N - 1])
             T.copy(b_ub, B[bx * block_M + vid * block_M // VEC_NUM, by * block_N])
 
     return main
@@ -1085,8 +1083,7 @@ def run_test_bitwise_lshift_tensor_slice(M, N, block_M, block_N, dtype, target):
 
     width = 16 if dtype in ["int16", "uint16"] else 32
     signed = dtype.startswith("int")
-    torch_dtype = {"int16": torch.int16, "int32": torch.int32,
-                   "uint16": torch.uint16, "uint32": torch.uint32}[dtype]
+    torch_dtype = {"int16": torch.int16, "int32": torch.int32, "uint16": torch.uint16, "uint32": torch.uint32}[dtype]
     mask = (1 << width) - 1
     sentinel = 0x5A5A if width == 16 else 0x5A5A5A5A
 
@@ -1137,8 +1134,7 @@ def test_bitwise_lshift_tensor_slice(dtype, shape):
 def test_bitwise_lshift_tensor_ascendc_rejected():
     """AscendC backend must reject the tensor shift-amount form."""
     func = bitwise_lshift_tensor(128, 256, 128, 256, "int16")
-    with pytest.raises(tilelang.tvm.error.TVMError,
-                       match="does not support tensor shift amounts"):
+    with pytest.raises(tilelang.tvm.error.TVMError, match="does not support tensor shift amounts"):
         tilelang.compile(func, out_idx=[-1], pass_configs=pass_configs, target="ascendc")
 
 
