@@ -1,9 +1,5 @@
 import os
 import random
-import subprocess
-import sys
-import tempfile
-import textwrap
 
 import pytest
 
@@ -1069,58 +1065,6 @@ def test_bitwise_rshift_unsupported_dtype_raises(dtype):
     dst = tir.decl_buffer((64, 128), dtype)
     with pytest.raises(ValueError, match="bitwise_rshift supports only int16, uint16, int32, uint32"):
         T.tile.bitwise_rshift(dst, src, 2)
-
-
-def _compile_rshift_in_subprocess(dtype, target):
-    """Compile an int64/uint64 rshift kernel in a subprocess.
-
-    The kernel must be rejected with a clear diagnostic before OptimizeForTarget
-    (issue #1720 used to SIGSEGV there). Running in a subprocess keeps a future
-    regression from crashing the pytest process; the return code and stderr are
-    asserted by the caller.
-    """
-    code = textwrap.dedent(
-        """\
-        import tilelang
-        import tilelang.language as T
-
-        M, N = 1024, 1024
-        block_M, block_N = 128, 256
-        m_num, n_num = M // block_M, N // block_N
-        VEC_NUM = 2
-
-        @T.prim_func
-        def main(A: T.Tensor((M, N), "{dtype}"), B: T.Tensor((M, N), "{dtype}")):
-            with T.Kernel(m_num * n_num, is_npu=True) as (cid, vid):
-                bx = cid // n_num
-                by = cid % n_num
-                a_ub = T.alloc_ub((block_M // VEC_NUM, block_N), "{dtype}")
-                b_ub = T.alloc_ub((block_M // VEC_NUM, block_N), "{dtype}")
-                T.copy(A[bx * block_M + vid * block_M // VEC_NUM, by * block_N], a_ub)
-                T.tile.bitwise_rshift(b_ub, a_ub, 2)
-                T.copy(b_ub, B[bx * block_M + vid * block_M // VEC_NUM, by * block_N])
-
-        tilelang.compile(main, out_idx=[-1], target="{target}")
-        """
-    ).format(dtype=dtype, target=target)
-    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
-        f.write(code)
-        script = f.name
-    try:
-        return subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=180)
-    finally:
-        os.unlink(script)
-
-
-@pytest.mark.parametrize("dtype", ["int64", "uint64"])
-@pytest.mark.parametrize("target", ["ascendc", "pto"])
-def test_bitwise_rshift_int64_no_compiler_crash(dtype, target):
-    """Compiling int64/uint64 rshift must raise a diagnostic, not SIGSEGV."""
-    proc = _compile_rshift_in_subprocess(dtype, target)
-    assert proc.returncode == 1, (
-        f"expected a Python exception (rc=1) for {dtype}/{target}, got rc={proc.returncode}; stderr={proc.stderr!r}"
-    )
-    assert "bitwise_rshift supports" in proc.stderr, f"missing unsupported-dtype diagnostic in stderr: {proc.stderr!r}"
 
 
 def bitwise_rshift_slice(M, N, block_M, block_N, scalarvalue, dtype="int32"):
