@@ -1307,6 +1307,7 @@ def test_bitwise_xor_uint8(dtype, shape):
     run_test_bitwise_xor_byte(M, N, 128, 256, dtype=dtype, target="pto")
 
 
+@pytest.mark.low_priority
 @pytest.mark.parametrize("dtype", ["uint8"])
 @pytest.mark.parametrize("shape", [(1024, 1024)])
 def test_bitwise_xor_uint8_explicit_tmp(dtype, shape):
@@ -1333,6 +1334,7 @@ def bitwise_xor_1d(N, dtype="uint8"):
     return main
 
 
+@pytest.mark.low_priority
 @pytest.mark.parametrize("dtype", ["uint8"])
 def test_bitwise_xor_uint8_1d(dtype):
     N = 1024
@@ -1375,6 +1377,7 @@ def bitwise_xor_slice_sentinel(M, N, block_M, block_N, dtype="uint8"):
     return main
 
 
+@pytest.mark.low_priority
 @pytest.mark.parametrize("dtype", ["uint8"])
 @pytest.mark.parametrize("shape", [(1024, 1024)])
 def test_bitwise_xor_uint8_slice_sentinel(dtype, shape):
@@ -1393,6 +1396,7 @@ def test_bitwise_xor_uint8_slice_sentinel(dtype, shape):
     assert_close_npu(c.cpu(), ref, dtype, rtol=0, atol=0)
 
 
+@pytest.mark.low_priority
 @pytest.mark.parametrize("dtype", ["int8"])
 @pytest.mark.parametrize("shape", [(1024, 1024)])
 def test_bitwise_xor_int8(dtype, shape):
