@@ -2582,7 +2582,7 @@ void CodeGenTileLangAscendPto::XorCodegen(const CallNode *op,
   // workspace is a 1D arena, and for a same-width dtype (e.g. uint8) the
   // access is not retyped, so GetSliceInfo reports is_slice=false and
   // ResolveUbSliceName would return the 1D tile descriptor, which TXOR then
-  // reads out of bounds (issue #1721).
+  // reads out of bounds.
   tmp_shape_info.is_slice = true;
   std::string tmp_name = ResolveUbSliceName(tmp_shape_info);
 
