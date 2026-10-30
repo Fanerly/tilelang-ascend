@@ -1566,14 +1566,6 @@ def mul_add_dst(
     )
 
 
-_BITWISE_LSHIFT_DTYPES = (
-    DataType("int16"),
-    DataType("uint16"),
-    DataType("int32"),
-    DataType("uint32"),
-)
-
-
 def bitwise_lshift(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, scalarValue: Buffer | BufferRegion | PrimExpr):  # noqa: F821
     """Performs element-wise bitwise left shift: dst = src0 << scalarValue.
 
@@ -1639,7 +1631,7 @@ def bitwise_lshift(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, scal
         shift_dtype = DataType(_underlying_buffer(scalarValue).dtype)
         if not (dst_dtype == src0_dtype == shift_dtype):
             raise ValueError("T.tile.bitwise_lshift with a tensor shift amount requires dst, src0 and scalarValue to have the same dtype.")
-        if dst_dtype not in _BITWISE_LSHIFT_DTYPES:
+        if dst_dtype not in (DataType("int16"), DataType("uint16"), DataType("int32"), DataType("uint32")):
             # Keep the tensor form consistent with the scalar form (AscendC
             # ShiftLeft and PTO TSHLS): only 16/32-bit signed/unsigned integers.
             # PTO TSHL itself also accepts int8/uint8, but the scalar form does
@@ -1648,7 +1640,7 @@ def bitwise_lshift(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, scal
 
         return tir.call_intrin(
             "handle",
-            tir.op.Op.get("tl.ascend_bitwise_lshift_tensor"),
+            tir.op.Op.get("tl.ascend_bitwise_lshift"),
             dst_ptr,
             src0_ptr,
             shift_ptr,
@@ -1657,7 +1649,7 @@ def bitwise_lshift(dst: Buffer | BufferRegion, src0: Buffer | BufferRegion, scal
 
     return tir.call_intrin(
         "handle",
-        tir.op.Op.get("tl.ascend_bitwise_lshift"),
+        tir.op.Op.get("tl.ascend_bitwise_lshifts"),
         dst_ptr,
         src0_ptr,
         scalarValue,
